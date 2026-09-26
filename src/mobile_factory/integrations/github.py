@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,43 @@ def gh(root: Path, *args: str, check: bool = True) -> str:
 def gh_json(root: Path, *args: str) -> Any:
     text = gh(root, *args)
     return json.loads(text) if text else None
+
+
+def accounts() -> list[str]:
+    r = run(["gh", "auth", "status", "--json", "hosts"])
+    if not r.ok and not r.out:
+        return []
+    hosts = json.loads(r.out or "{}").get("hosts", {})
+    return [a["login"] for a in hosts.get("github.com", []) if a.get("state") == "success"]
+
+
+def account_env(account: str) -> dict[str, str]:
+    """Env that makes gh and HTTPS git act as `account` for this process only (active gh account untouched).
+    SSH remotes still push with whatever SSH key matches."""
+    if not account:
+        return {}
+    r = run(["gh", "auth", "token", "--user", account])
+    if not r.ok:
+        raise FactoryError(f"gh has no login for {account}: gh auth login --web (as {account})")
+    helper = "credential.https://github.com.helper"
+    return {
+        "GH_TOKEN": r.out.strip(),
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": helper,
+        "GIT_CONFIG_VALUE_0": "",
+        "GIT_CONFIG_KEY_1": helper,
+        "GIT_CONFIG_VALUE_1": "!gh auth git-credential",
+    }
+
+
+def activate(account: str) -> None:
+    os.environ.update(account_env(account))
+
+
+def can_push(repo: str, account: str) -> bool:
+    env = {**os.environ, **account_env(account)}
+    r = run(["gh", "api", f"repos/{repo}", "--jq", ".permissions.push"], env=env)
+    return r.ok and r.out.strip() == "true"
 
 
 def authenticated(root: Path) -> bool:

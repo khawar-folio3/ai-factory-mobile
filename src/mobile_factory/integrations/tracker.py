@@ -200,13 +200,25 @@ class JiraRest(Tracker):
         return f"{key} -> {to_status}"
 
 
+def site_prefix(site: str) -> str:
+    return re.sub(r"^https?://", "", site).split(".")[0].split("/")[0]
+
+
+def normalize_site(value: str) -> str:
+    host = re.sub(r"^https?://", "", value.strip()).split("/")[0].lower()
+    return host if "." in host or not host else f"{host}.atlassian.net"
+
+
 class JiraTwg(Tracker):
+    """Atlassian twg CLI with the dev's own login; `--site` lets one machine work against several Jira sites."""
+
     def __init__(self, cfg: TrackerConfig) -> None:
         self.site = cfg.site
 
     def _json(self, *args: str) -> Any:
+        site = ["--site", site_prefix(self.site)] if self.site else []
         with tempfile.NamedTemporaryFile(suffix=".json") as f:
-            r = run(["twg", *args, "--output", "json", "--output-file", f.name])
+            r = run(["twg", *site, *args, "--output", "json", "--output-file", f.name])
             data = json.loads(Path(f.name).read_text() or "{}")
         if not r.ok or data.get("ok") is False:
             raise FactoryError(f"twg {' '.join(args[:3])} failed: {data.get('error') or r.err[:300]}")

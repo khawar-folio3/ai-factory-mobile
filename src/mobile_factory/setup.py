@@ -85,7 +85,7 @@ def tools(cfg: SetupConfig | None = None) -> list[Tool]:
             "",
             login="twg login",
             logged_in=lambda: run(["twg", "whoami"]).ok,
-            after="ask your lead for the twg installer, or set setup.tools.twg.install in factory.yaml",
+            after="run `factory init`: it asks for your team's twg install command",
         ),
         Tool(
             "java",

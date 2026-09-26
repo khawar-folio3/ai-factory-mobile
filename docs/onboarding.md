@@ -7,53 +7,51 @@ Two jobs, done by different people:
 | **Repo setup** | tech lead | once per repo | committed `factory.yaml`, `.factory/`, agent config |
 | **Machine setup** | every dev / PM | once per laptop | tools installed, logged in; no tokens to paste |
 
-## Repo setup (tech lead)
+## One command: `factory init`
+
+`factory init` is a guided setup that asks one thing at a time and checks every answer on the spot. The same command
+serves the first person on a repo and everyone after them:
+
+| Step | Asked | Checked with | Saved to |
+|---|---|---|---|
+| Project (first time only, or `--reconfigure`) | base branch (picked from remote branches), Gradle variant, Jira site URL, project keys, autonomy ceiling | — | `factory.yaml` (committed) |
+| Jira sign-in | twg or API token. twg missing → paste your team's install command, it runs it; not logged in → runs `twg login` | `twg --site <site> whoami` / Jira `/myself` | `.factory/local.yaml`; tokens to the secrets file |
+| GitHub | which logged-in `gh` account opens PRs here (the one that can push is preselected); none → `gh auth login --web` | repo push permission | `.factory/local.yaml` |
+| Slack (optional) | incoming webhook URL | format | secrets file |
+| Figma | enable Dev Mode MCP Server | local port 3845 | — |
+| Machine tools | install git, gh, JDK, Android Studio, adb, Figma if missing | presence | — |
+
+Nothing is hard-coded: each repo names its own Jira site, and each dev's answers stay on their machine. One
+machine can work on several repos with different Jira sites and GitHub accounts at the same time: the factory uses
+`twg --site <site>` and that repo's GitHub account for every call, without switching your active `gh` account.
+
+Secrets get per-site / per-project names (`JIRA_API_TOKEN__ACME`, `SLACK_WEBHOOK_URL__MY_APP`) so projects never
+overwrite each other's tokens. Values live only in `~/.config/mobile-factory/secrets.env` (0600); `factory.yaml` and
+`.factory/local.yaml` hold references.
+
+## Tech lead, first time on a repo
 
 ```bash
-cd your-app
-factory init                  # sets up your machine first, then detects modules, applicationId, launcher, base branch, twg site
+cd your-app && factory init
+factory guardrail learn --bases <main branch>     # then distill .factory/taste.md with the guardrail-learn skill
+factory install --target all
 ```
 
-Set `setup.tools.twg.install` in `factory.yaml` to your company's twg install command so every dev's
-`factory setup` can install it.
+Commit `factory.yaml`, `.factory/{taste.md,knowledge/,flows/}`, `.claude/skills/`, `.cursor/rules/`, `.mcp.json`,
+`.cursor/mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.gitignore`. None of them contain a secret or anyone's account.
 
-1. Review `factory.yaml`: `base_branch`, `android.variant`, `tracker.projects`, `forbidden_paths`, `local_only_paths`.
-2. `factory guardrail learn --bases <main branch>`, then have your agent distill `.factory/taste.md` with the
-   `guardrail-learn` skill; the code owner approves it in a PR.
-3. Write the first `.factory/knowledge/*.md` rules (traps, architecture boundaries).
-4. `factory install --target all` and commit: `factory.yaml`, `.factory/{taste.md,knowledge/,flows/}`,
-   `.claude/skills/`, `.cursor/rules/`, `.mcp.json`, `.cursor/mcp.json`, `CLAUDE.md`, `AGENTS.md`, `.gitignore`.
-   None of these contain a secret; `factory.yaml` refuses to load if one does.
-
-## Machine setup (each dev)
-
-With the defaults, **no token is needed**: Jira goes through the dev's own `twg` login, GitHub through their own `gh`
-login, Figma through the desktop app.
+## Every dev, new machine
 
 ```bash
-brew install pipx && pipx ensurepath                               # Homebrew: https://brew.sh
+brew install pipx && pipx ensurepath                                 # Homebrew: https://brew.sh
 pipx install git+https://github.com/khawar-folio3/ai-factory-mobile
 git clone <project repo> && cd <project>
-factory setup                                                       # installs + logs in, asks before each step
+factory init                                                          # sees factory.yaml, asks only your part
 factory doctor
 ```
 
-`factory setup` checks each tool and offers the fix, one confirmation at a time:
-
-| Tool | Installed with | Then |
-|---|---|---|
-| git, gh | `brew install` | `gh auth login --web` (browser) |
-| twg | the command in `setup.tools.twg.install` (set once by the lead) | `twg login` (browser) |
-| JDK, Android Studio, adb | `brew install --cask temurin@17 / android-studio / android-platform-tools` | open Android Studio once, create an emulator |
-| Figma | `brew install --cask figma` | Figma → Preferences → **Enable Dev Mode MCP Server** (checked on the next run) |
-| Maestro (optional) | official installer, with `factory setup --optional` | |
-
-Re-run it any time; finished steps show `ok`. Claude Code or Cursor you install yourself.
-
-`factory doctor` shows **who** will act for you — `gh authenticated (as <login>)`, `tracker reachable (twg as <name>
-<email>)` — so a wrong account is caught before the first run. `warn` lines are optional.
-
-Then open your agent in the repo and ask: *"fix APP-123 with the factory"*.
+`factory doctor` shows who acts for you (`gh authenticated (as <login>)`, `tracker reachable (twg as <name> <email>)`).
+Re-run `factory init` any time to change your answers; `factory setup` re-checks only the machine tools.
 
 ## Optional secrets
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from .errors import ConfigError
 
 CONFIG_NAME = "factory.yaml"
+LOCAL_NAME = ".factory/local.yaml"  # per developer, git-ignored: which accounts and auth this dev uses here
 FACTORY_DIR = ".factory"
 DEFAULT_SECRETS_FILE = "~/.config/mobile-factory/secrets.env"
 
@@ -112,6 +113,7 @@ class VcsConfig(_Model):
     draft: bool = True
     pr_label: str = ""
     forbid_attribution: bool = True
+    github_account: str = ""  # gh login used for this repo (per dev, in .factory/local.yaml); "" = gh's active account
 
 
 class GuardrailConfig(_Model):
@@ -265,17 +267,31 @@ def plaintext_secrets(raw: Any, path: str = "") -> list[str]:
     return hits
 
 
-def load(root: Path | None = None) -> LoadedConfig:
-    root = root or find_root()
-    file = root / CONFIG_NAME
+def read_yaml(file: Path) -> dict[str, Any]:
+    if not file.is_file():
+        return {}
     try:
-        raw = yaml.safe_load(file.read_text()) or {}
+        data = yaml.safe_load(file.read_text()) or {}
     except yaml.YAMLError as e:
         raise ConfigError(f"{file}: invalid YAML: {e}") from e
-    if leaks := plaintext_secrets(raw):
+    if leaks := plaintext_secrets(data):
         raise ConfigError(
             f"{file}: plaintext secret at {', '.join(leaks)}. Use ${{VAR}} and `factory secrets set VAR` instead."
         )
+    return data if isinstance(data, dict) else {}
+
+
+def deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def load(root: Path | None = None) -> LoadedConfig:
+    root = root or find_root()
+    file = root / CONFIG_NAME
+    raw = deep_merge(read_yaml(file), read_yaml(root / LOCAL_NAME))
     missing: set[str] = set()
     resolved = interpolate(raw, environment(raw.get("secrets_file", DEFAULT_SECRETS_FILE)), missing)
     try:

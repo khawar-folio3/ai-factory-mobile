@@ -23,14 +23,14 @@ project:
 android:
   app_module: __APP_MODULE__
   modules: __MODULES__
-  variant: Debug                 # gradle variant suffix: install<variant>, lint<variant>, test<variant>UnitTest
+  variant: __VARIANT__                 # gradle variant suffix: install<variant>, lint<variant>, test<variant>UnitTest
   application_id: "__APP_ID__"
   launch_activity: "__LAUNCHER__"
   avd: ""                        # booted automatically when no device is attached
   deeplink_scheme: ""
 
 autonomy:
-  ceiling: 2                     # 0 manual … 4 autonomous; the risk score can only lower it
+  ceiling: __CEILING__                     # 0 manual … 4 autonomous; the risk score can only lower it
   thresholds: {4: 15, 3: 35, 2: 55, 1: 75}
 
 gates:                           # a gate is automatic when the run's level >= auto_at (5 = always human)
@@ -54,7 +54,7 @@ tracker:
   # provider: rest
   # email: "${JIRA_EMAIL}"
   # token: "${JIRA_API_TOKEN}"
-  projects: []
+  projects: __PROJECTS__
   allowed_types: [Bug, Task]
   block_labels: [no-bot, security, needs-design]
   transitions: {}                # e.g. {start: "In Development", review: "Quality Assurance"}
@@ -72,17 +72,15 @@ guardrail:
   commands: []                   # extra checks, e.g. ["./gradlew detekt"]
 
 notifications:
-  slack_webhook: "${SLACK_WEBHOOK_URL:-}"
+  slack_webhook: ""              # each dev's own webhook reference goes in .factory/local.yaml (factory init asks)
 
 viz:
   pixel_agents: false
 
-# `factory setup` (also run by `factory init`) installs and logs in to git, gh, twg, a JDK, Android Studio, adb and
-# Figma on each dev's machine. twg ships from a company installer: put its one-line install command here once.
+# `factory init` / `factory setup` install and log in to git, gh, twg, a JDK, Android Studio, adb and Figma.
+# Per-dev answers (twg installer, GitHub account, Jira auth, Slack webhook) go to .factory/local.yaml, never here.
 setup:
-  tools:
-    twg: {install: ""}           # e.g. the command your Atlassian admin gives you
-    # figma: {skip: true}        # skip a tool this repo does not need
+  tools: {}                      # e.g. {figma: {skip: true}} for a repo that does not need a tool
 
 # Rendered into .mcp.json (Claude Code) and .cursor/mcp.json (Cursor) by `factory install`.
 # GitHub and Jira need no MCP server: the factory and the agent use the `gh` and `twg` CLIs with each dev's own login.

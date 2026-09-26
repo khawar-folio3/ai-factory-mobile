@@ -44,7 +44,7 @@ Requires Python 3.11+, `git`, `gh` (authenticated), and for Android: `adb`, a JD
 
 ```bash
 cd your-android-app
-factory init                          # installs + logs in to gh, twg, JDK, Android tools, Figma; then writes factory.yaml
+factory init                          # guided: asks and verifies Jira site + sign-in, GitHub account, Slack, Figma; installs tools
 factory doctor                        # tools, logins (and which account acts for you), device
 factory install --target all          # skills + MCP config for Claude Code (.claude/, .mcp.json) and Cursor (.cursor/)
 ```

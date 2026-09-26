@@ -9,7 +9,8 @@ from .config import CONFIG_NAME
 from .errors import FactoryError
 from .proc import has, run
 
-GITIGNORE = [".factory/runs/", ".factory/data/", ".factory/events.jsonl", ".factory/evals/work/"]
+TEMPLATE_DEFAULTS = {"__VARIANT__": "Debug", "__CEILING__": "1", "__PROJECTS__": "[]"}
+GITIGNORE = [".factory/runs/", ".factory/data/", ".factory/events.jsonl", ".factory/evals/work/", ".factory/local.yaml"]
 
 
 def _grep(files: list[Path], pattern: str) -> str:
@@ -66,12 +67,13 @@ def detect(root: Path) -> dict[str, str]:
     }
 
 
-def init(root: Path, force: bool = False) -> list[str]:
+def init(root: Path, force: bool = False, answers: dict[str, str] | None = None) -> list[str]:
     cfg = root / CONFIG_NAME
     if cfg.exists() and not force:
         raise FactoryError(f"{cfg} exists (use --force to overwrite)")
     text = resources.files("mobile_factory.templates").joinpath("factory.yaml").read_text()
-    values = detect(root)
+    detected = detect(root)
+    values = {**TEMPLATE_DEFAULTS, **detected, **(answers or {})}
     for k, v in values.items():
         text = text.replace(k, v)
     cfg.write_text(text)
@@ -87,4 +89,4 @@ def init(root: Path, force: bool = False) -> list[str]:
         gi.write_text(
             current.rstrip() + ("\n\n" if current.strip() else "") + "# mobile-factory\n" + "\n".join(add) + "\n"
         )
-    return [f"{k.strip('_').lower()}: {v or '(not detected, fill in)'}" for k, v in values.items()]
+    return [f"{k.strip('_').lower()}: {values[k] or '(not detected, fill in)'}" for k in detected]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import getpass
 import json
 import os
@@ -19,11 +20,13 @@ from .guardrail import context as review_ctx
 from .guardrail import harvest as harvester
 from .guardrail import rules as rl
 from .init import init as do_init
+from .integrations import github
 from .outputs import MODELS
 from .pipeline import Engine
 from .platforms import make as make_platform
 from .platforms.base import snapshot_diff
 from .state import RunStore
+from .wizard import Wizard, store_secret
 
 app = typer.Typer(
     no_args_is_help=True, add_completion=False, help="Mobile Factory: ticket -> verified draft PR, with gates."
@@ -43,7 +46,9 @@ RunOpt = Annotated[str | None, typer.Option("--run", help="Run id (default: the 
 
 
 def _lc() -> config.LoadedConfig:
-    return config.load()
+    lc = config.load()
+    github.activate(lc.cfg.vcs.github_account)
+    return lc
 
 
 def _engine(run: str | None = None) -> Engine:
@@ -103,22 +108,48 @@ def setup(
     raise typer.Exit(0 if ok else 1)
 
 
+class _TerminalPrompter:
+    def say(self, text: str) -> None:
+        _say(text)
+
+    def ask(self, question: str, default: str = "") -> str:
+        return str(typer.prompt(question, default=default, show_default=bool(default))).strip()
+
+    def secret(self, question: str) -> str:
+        return getpass.getpass(f"{question}: ").strip()
+
+    def choose(self, question: str, options: list[str], default: int = 0) -> int:
+        _say(question)
+        for i, o in enumerate(options, 1):
+            _say(f"  {i}) {o}")
+        n = int(typer.prompt("choose", default=default + 1, type=int))
+        return min(max(n, 1), len(options)) - 1
+
+    def confirm(self, question: str, default: bool = True) -> bool:
+        return typer.confirm(question, default=default)
+
+
 @app.command()
 def init(
-    force: bool = typer.Option(False, help="Overwrite an existing factory.yaml."),
-    skip_setup: bool = typer.Option(False, help="Do not check or install machine tools first."),
+    reconfigure: bool = typer.Option(False, help="Ask the project questions again and rewrite factory.yaml."),
+    skip_setup: bool = typer.Option(False, help="Do not check or install machine tools afterwards."),
+    defaults: bool = typer.Option(False, help="Non-interactive: write factory.yaml from detected values only."),
 ) -> None:
-    """Set up this machine (tools + logins), then create factory.yaml and .factory/ for the current repo."""
-    if not skip_setup:
-        _say("== machine")
-        _setup(yes=False, optional=False)
-        _say("\n== repo")
+    """Guided setup: project settings (first time), then your Jira, GitHub, Slack and Figma access, then machine tools."""
     root = Path.cwd()
-    for line in do_init(root, force):
-        _say(f"  {line}")
-    _say(
-        f"wrote {root / config.CONFIG_NAME}; review it, then `factory doctor` and `factory install --target claude|cursor`"
-    )
+    if defaults:
+        for line in do_init(root, force=reconfigure):
+            _say(f"  {line}")
+        _say(f"wrote {root / config.CONFIG_NAME}")
+        return
+    _human_only("factory init")
+    res = Wizard(root, _TerminalPrompter()).run(reconfigure=reconfigure)
+    if not skip_setup:
+        _say("\n== Machine tools")
+        _setup(yes=False, optional=False)
+    if res.todo:
+        _say("\nstill to do:\n" + "\n".join(f"  - {t}" for t in res.todo))
+    _say("\nnext: `factory doctor`, then `factory install --target claude|cursor` (lead: commit the result)")
 
 
 @app.command()
@@ -145,18 +176,10 @@ def doctor_cmd(offline: bool = typer.Option(False, help="Skip network checks."))
 def secrets_set(name: str) -> None:
     """Store a secret (typed, never echoed) in the per-machine secrets file."""
     _human_only("setting a secret")
-    path = config.secrets_path(_secrets_file())
     value = getpass.getpass(f"{name}: ")
     if not value:
         raise FactoryError("empty value, nothing stored")
-    current = config.read_env_file(path)
-    current[name] = value
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write("".join(f"{k}={v}\n" for k, v in sorted(current.items())))
-    os.chmod(path, 0o600)
-    _say(f"stored {name} in {path}")
+    _say(f"stored {name} in {store_secret(name, value, _secrets_file())}")
 
 
 @secrets_app.command("list")
@@ -187,6 +210,8 @@ def exec_cmd(ctx: typer.Context) -> None:
     if not ctx.args:
         raise FactoryError("usage: factory exec -- <command> [args]")
     env = config.environment(_secrets_file())
+    with contextlib.suppress(FactoryError):  # outside a factory repo: plain environment
+        env.update(github.account_env(config.load().cfg.vcs.github_account))
     os.execvpe(ctx.args[0], ctx.args, env)  # noqa: S606 - the user's own command
 
 

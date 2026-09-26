@@ -301,6 +301,13 @@ def load(root: Path | None = None) -> LoadedConfig:
     return LoadedConfig(root, cfg, raw, missing)
 
 
+def figma_mode(cfg: FactoryConfig) -> Literal["desktop", "remote", "none"]:
+    urls = [s.url for s in cfg.mcp_servers.values()]
+    if any(":3845" in u for u in urls):
+        return "desktop"
+    return "remote" if any("figma.com" in u for u in urls) else "none"
+
+
 def env_refs(raw: Any) -> set[str]:
     if isinstance(raw, str):
         return {m.group(1) for m in _ENV_REF.finditer(raw)}

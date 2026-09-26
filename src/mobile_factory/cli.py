@@ -79,10 +79,11 @@ def version() -> None:
 
 def _setup(yes: bool, optional: bool) -> bool:
     try:
-        cfg = config.load().cfg.setup
+        loaded = config.load().cfg
+        cfg, figma = loaded.setup, config.figma_mode(loaded)
     except FactoryError:
-        cfg = None
-    p = machine.plan(machine.tools(cfg), optional=optional)
+        cfg, figma = None, "desktop"
+    p = machine.plan(machine.tools(cfg, figma), optional=optional)
     _say(p.render())
     if not p.todo:
         _say("machine ready")

@@ -86,7 +86,8 @@ setup:
 # GitHub and Jira need no MCP server: the factory and the agent use the `gh` and `twg` CLIs with each dev's own login.
 mcp_servers:
   figma:
-    url: http://127.0.0.1:3845/mcp   # Figma desktop app → Preferences → Enable Dev Mode MCP Server; no token
+    url: https://mcp.figma.com/mcp   # Figma's remote server: each dev signs in to Figma on first use; no token
+    # url: http://127.0.0.1:3845/mcp # or the desktop app's server (Dev Mode → MCP server → Enable desktop MCP server)
 #  Servers that need a secret reference it, never hold it:
 #  internal:
 #    url: https://mcp.example.com/mcp

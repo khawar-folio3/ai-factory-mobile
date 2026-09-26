@@ -248,17 +248,24 @@ class Wizard:
         self.result.secrets.append(var)
         self.result.local = config.deep_merge(self.result.local, {"notifications": {"slack_webhook": f"${{{var}}}"}})
 
-    def figma(self) -> None:
+    def figma(self, lc: config.LoadedConfig) -> None:
         p = self.p
-        p.say("\n== Figma")
-        if self.c.figma_ready():
-            p.say("  ok  Dev Mode MCP server is running")
+        mode = config.figma_mode(lc.cfg)
+        if mode == "none":
             return
-        p.say("  open Figma → Preferences → Enable Dev Mode MCP Server (needs a Dev or Full seat)")
+        p.say(f"\n== Figma ({mode} MCP server)")
+        if mode == "remote":
+            p.say("  your agent asks you to sign in to Figma in the browser the first time it reads a design")
+            p.say("  real use needs a Dev or Full seat on a paid Figma plan (Starter: 20 calls/month)")
+            return
+        if self.c.figma_ready():
+            p.say("  ok  desktop MCP server is running")
+            return
+        p.say(f"  {machine.DESKTOP_HINT}")
         if p.confirm("Done? (check again)") and self.c.figma_ready():
             p.say("  ok")
             return
-        self.result.todo.append("enable Figma's Dev Mode MCP Server")
+        self.result.todo.append("enable Figma's desktop MCP server")
 
     # ---------- flow ----------
 
@@ -274,7 +281,7 @@ class Wizard:
         self.jira(lc)
         self.github(lc)
         self.slack(lc)
-        self.figma()
+        self.figma(lc)
         if self.result.local:
             _write_local(self.root, self.result.local)
             p.say(f"\nsaved your settings to {LOCAL_NAME} (git-ignored)")

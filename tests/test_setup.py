@@ -79,3 +79,18 @@ def test_lead_provides_twg_installer_and_can_skip_tools() -> None:
     assert by_name["twg"].install.startswith("curl") and by_name["twg"].after == ""
     assert "figma" not in by_name
     assert {"git", "gh", "twg", "java", "android-studio", "adb", "maestro"} <= by_name.keys()
+
+
+def test_figma_mode_follows_the_configured_server() -> None:
+    from mobile_factory.config import FactoryConfig, figma_mode
+
+    def cfg(url: str) -> FactoryConfig:
+        return FactoryConfig.model_validate(
+            {"project": {"name": "d"}, "mcp_servers": {"figma": {"url": url}} if url else {}}
+        )
+
+    assert figma_mode(cfg("http://127.0.0.1:3845/mcp")) == "desktop"
+    assert figma_mode(cfg("https://mcp.figma.com/mcp")) == "remote"
+    assert figma_mode(cfg("")) == "none"
+    assert "figma" in {t.name for t in machine.tools(None, "desktop")}
+    assert "figma" not in {t.name for t in machine.tools(None, "remote")}

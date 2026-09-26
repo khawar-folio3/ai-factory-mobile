@@ -62,7 +62,10 @@ class Plan:
         )
 
 
-def tools(cfg: SetupConfig | None = None) -> list[Tool]:
+DESKTOP_HINT = "Figma desktop app → open a Design file → Dev Mode (Shift+D) → inspect panel → MCP server → Enable desktop MCP server (paid plan, Dev or Full seat)"
+
+
+def tools(cfg: SetupConfig | None = None, figma: str = "desktop") -> list[Tool]:
     mac = platform.system() == "Darwin"
 
     def cask(name: str) -> str:
@@ -107,7 +110,7 @@ def tools(cfg: SetupConfig | None = None) -> list[Tool]:
             _app("Figma"),
             cask("figma"),
             ready=lambda: _port_open(FIGMA_MCP_PORT),
-            after="open Figma → Preferences → Enable Dev Mode MCP Server (needs a Dev or Full seat)",
+            after=DESKTOP_HINT,
         ),
         Tool(
             "maestro",
@@ -120,6 +123,8 @@ def tools(cfg: SetupConfig | None = None) -> list[Tool]:
     overrides = (cfg or SetupConfig()).tools
     out = []
     for t in listed:
+        if t.name == "figma" and figma != "desktop":
+            continue  # remote server or no Figma: the desktop app is not needed
         o = overrides.get(t.name)
         if o and o.skip:
             continue

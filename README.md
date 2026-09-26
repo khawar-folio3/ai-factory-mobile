@@ -99,8 +99,8 @@ Only the rules whose globs/keywords match the diff are loaded, so review stays c
 ## One config, every machine
 
 `factory.yaml` is committed and **cannot** contain a secret (plaintext tokens are refused at load). By default nothing
-needs one: GitHub goes through each dev's `gh` login, Jira through their `twg` login, Figma through the desktop app's
-MCP server. Anything that does need a secret (a Slack webhook, Jira REST, an extra MCP server) references `${VAR}`,
+needs one: GitHub goes through each dev's `gh` login, Jira through their `twg` login, Figma through its remote
+MCP server (each dev signs in on first use). Anything that does need a secret (a Slack webhook, Jira REST, an extra MCP server) references `${VAR}`,
 stored once per machine with `factory secrets set VAR`; `factory install` renders MCP servers for Claude Code
 (`${VAR}`) and Cursor (`${env:VAR}`) without writing values. Details: [docs/configuration.md](docs/configuration.md).
 

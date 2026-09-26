@@ -18,8 +18,8 @@ serves the first person on a repo and everyone after them:
 | Jira sign-in | twg or API token. twg missing → paste your team's install command, it runs it; not logged in → runs `twg login` | `twg --site <site> whoami` / Jira `/myself` | `.factory/local.yaml`; tokens to the secrets file |
 | GitHub | which logged-in `gh` account opens PRs here (the one that can push is preselected); none → `gh auth login --web` | repo push permission | `.factory/local.yaml` |
 | Slack (optional) | incoming webhook URL | format | secrets file |
-| Figma | enable Dev Mode MCP Server | local port 3845 | — |
-| Machine tools | install git, gh, JDK, Android Studio, adb, Figma if missing | presence | — |
+| Figma | remote server (default): nothing, you sign in on first use; desktop server: the Dev Mode toggle | desktop: local port 3845 | — |
+| Machine tools | install git, gh, JDK, Android Studio, adb (and the Figma app if the repo uses the desktop server) | presence | — |
 
 Nothing is hard-coded: each repo names its own Jira site, and each dev's answers stay on their machine. One
 machine can work on several repos with different Jira sites and GitHub accounts at the same time: the factory uses
@@ -52,6 +52,14 @@ factory doctor
 
 `factory doctor` shows who acts for you (`gh authenticated (as <login>)`, `tracker reachable (twg as <name> <email>)`).
 Re-run `factory init` any time to change your answers; `factory setup` re-checks only the machine tools.
+
+## Figma
+
+Repos default to Figma's remote MCP server (`https://mcp.figma.com/mcp`): no app or token; each dev's agent opens a
+Figma sign-in the first time it reads a design. Switch a repo to the desktop server (`http://127.0.0.1:3845/mcp`) only
+if your organisation requires it (Figma desktop → Design file → Dev Mode → inspect panel → MCP server → Enable desktop
+MCP server). Either way, useful volume needs a **Dev or Full seat on a paid plan** (Professional: 200 calls/day);
+Starter allows 20 calls per month.
 
 ## Optional secrets
 

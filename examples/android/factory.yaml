@@ -38,4 +38,4 @@ viz:
 # GitHub and Jira go through the `gh` and `twg` CLIs; only Figma needs an MCP server, and it needs no token.
 mcp_servers:
   figma:
-    url: http://127.0.0.1:3845/mcp
+    url: https://mcp.figma.com/mcp

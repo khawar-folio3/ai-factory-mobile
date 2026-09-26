@@ -43,13 +43,16 @@ Requires Python 3.11+, `git`, `gh` (authenticated), and for Android: `adb`, a JD
 ## Quick start
 
 ```bash
+gh auth login --web                   # GitHub: your own login, no token to paste
+twg login                             # Jira via the Atlassian twg CLI (or tracker.provider: rest with an API token)
 cd your-android-app
 factory init                          # writes factory.yaml with detected modules, applicationId, launcher, base branch
-factory secrets set JIRA_API_TOKEN    # one secrets file per machine (~/.config/mobile-factory/secrets.env, 0600)
-factory doctor                        # tools, auth, secrets, device
+factory doctor                        # tools, logins (and which account acts for you), device
 factory install --target all          # skills + MCP config for Claude Code (.claude/, .mcp.json) and Cursor (.cursor/)
-factory exec -- claude                # launch your agent with the secrets in its environment
 ```
+
+A repo set up once by the lead needs only the logins and `factory doctor` on each new machine: see
+[docs/onboarding.md](docs/onboarding.md).
 
 Then ask the agent: *"fix APP-123 with the factory"*. The agent loops `factory next` → does the step → `factory submit`.
 When a gate needs you, it stops and tells you to run, in your own terminal:
@@ -97,10 +100,11 @@ Only the rules whose globs/keywords match the diff are loaded, so review stays c
 
 ## One config, every machine
 
-`factory.yaml` is committed and **cannot** contain a secret (plaintext tokens are refused at load). Secrets live in one
-per-machine file referenced as `${VAR}`. The same file declares the team's MCP servers (Figma, Atlassian, GitHub,
-Slack…); `factory install` renders them for Claude Code (`${VAR}`) and Cursor (`${env:VAR}`) without writing values.
-Setting up a new laptop: `pipx install`, `factory secrets set …`, `factory doctor`. Details: [docs/configuration.md](docs/configuration.md).
+`factory.yaml` is committed and **cannot** contain a secret (plaintext tokens are refused at load). By default nothing
+needs one: GitHub goes through each dev's `gh` login, Jira through their `twg` login, Figma through the desktop app's
+MCP server. Anything that does need a secret (a Slack webhook, Jira REST, an extra MCP server) references `${VAR}`,
+stored once per machine with `factory secrets set VAR`; `factory install` renders MCP servers for Claude Code
+(`${VAR}`) and Cursor (`${env:VAR}`) without writing values. Details: [docs/configuration.md](docs/configuration.md).
 
 ## Measuring it
 
@@ -129,7 +133,7 @@ as a character: steps are tools it works on, gates are permission prompts it wai
 
 ## Documentation
 
-[Architecture](docs/architecture.md) · [Autonomy](docs/autonomy.md) · [Configuration](docs/configuration.md) ·
+[Onboarding](docs/onboarding.md) · [Architecture](docs/architecture.md) · [Autonomy](docs/autonomy.md) · [Configuration](docs/configuration.md) ·
 [Guardrail](docs/guardrail.md) · [Events & visualisation](docs/events.md) · [Evals](docs/evals.md) ·
 [Adding a platform](docs/platforms.md) · [Roadmap](docs/roadmap.md)
 

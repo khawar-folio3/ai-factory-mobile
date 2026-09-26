@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import CONFIG_NAME
 from .errors import FactoryError
-from .proc import run
+from .proc import has, run
 
 GITIGNORE = [".factory/runs/", ".factory/data/", ".factory/events.jsonl", ".factory/evals/work/"]
 
@@ -43,6 +43,13 @@ def detect(root: Path) -> dict[str, str]:
             if "android.intent.category.LAUNCHER" in block and (m := re.search(r'android:name="([^"]+)"', block)):
                 launcher = m.group(1)
                 break
+    kind, site = "file", ""
+    if has("twg"):
+        kind = "jira"
+        conf = Path.home() / ".config" / "twg" / "auth.conf"
+        site = _grep([conf], r"""site\s*[=:]\s*["']?([\w.-]+)""") if conf.is_file() else ""
+        if site and "." not in site:
+            site = f"{site}.atlassian.net"
     base = ""
     r = run(["gh", "repo", "view", "--json", "defaultBranchRef"], root)
     if r.ok:
@@ -54,6 +61,8 @@ def detect(root: Path) -> dict[str, str]:
         "__MODULES__": json.dumps(modules),
         "__APP_ID__": app_id,
         "__LAUNCHER__": launcher,
+        "__TRACKER_KIND__": kind,
+        "__JIRA_SITE__": site,
     }
 
 

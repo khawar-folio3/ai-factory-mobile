@@ -7,6 +7,7 @@ import pytest
 from conftest import FakePlatform, git
 from typer.testing import CliRunner
 
+from mobile_factory import config
 from mobile_factory.cli import app
 from mobile_factory.platforms.base import CheckRun
 
@@ -32,14 +33,31 @@ def test_init_detects_android_project(tmp_path: Path, monkeypatch: pytest.Monkey
         '<activity android:name=".MainActivity"><intent-filter>'
         '<category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>'
     )
+    monkeypatch.setattr("mobile_factory.init.has", lambda tool: False)
     r = runner.invoke(app, ["init"])
     assert r.exit_code == 0, r.output
     text = (tmp_path / "factory.yaml").read_text()
+    assert "kind: file" in text
     assert 'application_id: "com.acme.app"' in text
     assert 'launch_activity: ".MainActivity"' in text
     assert 'modules: ["app", "core/ui"]' in text
     assert ".factory/runs/" in (tmp_path / ".gitignore").read_text()
     assert runner.invoke(app, ["init"]).exit_code != 0
+
+
+def test_init_uses_twg_login_when_available(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    (home / ".config/twg").mkdir(parents=True)
+    (home / ".config/twg/auth.conf").write_text("user=a@b.c\ntoken=s3cr3tvalue\nsite=acme\n")
+    monkeypatch.setattr("mobile_factory.init.Path.home", lambda: home)
+    monkeypatch.setattr("mobile_factory.init.has", lambda tool: tool == "twg")
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    text = (tmp_path / "factory.yaml").read_text()
+    assert "kind: jira" in text and 'site: "acme.atlassian.net"' in text and "s3cr3tvalue" not in text
+    lc = config.load(tmp_path)
+    assert lc.cfg.tracker.provider == "twg"
+    assert config.env_refs(lc.raw) == {"SLACK_WEBHOOK_URL"}  # optional, has a default: nothing is required
 
 
 def test_doctor_offline(in_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:

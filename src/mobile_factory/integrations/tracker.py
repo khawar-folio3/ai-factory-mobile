@@ -213,8 +213,10 @@ class JiraTwg(Tracker):
         return data
 
     def ping(self) -> str:
+        me = self._json("whoami")
+        d = me.get("data", me)
         self._json("jira", "workitem", "query", "--jql", "created >= -1d", "--limit", "1")
-        return f"twg {self.site}".strip()
+        return f"twg as {d.get('name', '?')} <{d.get('email', '?')}>"
 
     def get(self, key: str) -> Ticket:
         d = self._json("jira", "workitem", "get", key, "--full")

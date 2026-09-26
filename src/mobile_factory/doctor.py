@@ -21,20 +21,20 @@ def checks(lc: LoadedConfig, online: bool = True) -> list[Check]:
     sp = secrets_path(c.secrets_file)
     if sp.exists():
         mode = stat.S_IMODE(sp.stat().st_mode)
-        out.append(Check("secrets file private", mode & 0o077 == 0, f"{sp} mode {oct(mode)}; chmod 600 {sp}"))
+        private = mode & 0o077 == 0
+        out.append(Check("secrets file private", private, str(sp) if private else f"mode {oct(mode)}: chmod 600 {sp}"))
     missing = sorted(lc.missing_env)
     out.append(
         Check(
             "secrets resolved",
             not missing,
-            f"{len(env_refs(lc.raw))} referenced"
+            (f"{len(env_refs(lc.raw))} referenced" if env_refs(lc.raw) else "none needed")
             if not missing
             else f"missing: {', '.join(missing)} -> factory secrets set <NAME>",
         )
     )
 
-    gitignore = (lc.root / ".gitignore").read_text() if (lc.root / ".gitignore").is_file() else ""
-    ignored = ".factory/runs" in gitignore or ".factory/" in gitignore
+    ignored = run(["git", "check-ignore", "-q", ".factory/runs/probe"], lc.root).ok  # .gitignore or info/exclude
     out.append(
         Check(".factory/runs ignored by git", ignored, "" if ignored else "add .factory/runs/ and .factory/data/")
     )
@@ -43,7 +43,8 @@ def checks(lc: LoadedConfig, online: bool = True) -> list[Check]:
     out.append(Check("taste rules", has_taste, "" if has_taste else hint, optional=True))
 
     if online:
-        out.append(Check("gh authenticated", has("gh") and github.authenticated(lc.root), "gh auth login"))
+        login = github.login(lc.root) if has("gh") else ""
+        out.append(Check("gh authenticated", bool(login), f"as {login}" if login else "gh auth login --web"))
         if c.project.base_branch not in ("", "ask"):
             ok = run(["git", "ls-remote", "--exit-code", "--heads", c.vcs.remote, c.project.base_branch], lc.root).ok
             out.append(Check(f"base branch {c.project.base_branch}", ok, f"not found on {c.vcs.remote}"))

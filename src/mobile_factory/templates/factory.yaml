@@ -47,11 +47,13 @@ limits:
   rollback_on_fail: true
 
 tracker:
-  kind: file                     # file (.factory/tickets/<KEY>.md) | jira
-  provider: rest                 # rest | twg
-  site: ""                       # acme.atlassian.net
-  email: "${JIRA_EMAIL:-}"
-  token: "${JIRA_API_TOKEN:-}"
+  kind: __TRACKER_KIND__                     # jira | file (.factory/tickets/<KEY>.md, no Jira needed)
+  provider: twg                  # twg: each dev's own `twg login`, no token here
+  site: "__JIRA_SITE__"                       # acme.atlassian.net
+  # Without twg, use Jira REST instead (needs two secrets per dev):
+  # provider: rest
+  # email: "${JIRA_EMAIL}"
+  # token: "${JIRA_API_TOKEN}"
   projects: []
   allowed_types: [Bug, Task]
   block_labels: [no-bot, security, needs-design]
@@ -76,12 +78,11 @@ viz:
   pixel_agents: false
 
 # Rendered into .mcp.json (Claude Code) and .cursor/mcp.json (Cursor) by `factory install`.
-# Values stay ${VAR} references; launch the tool with `factory exec -- claude` or `factory exec -- cursor .`
-mcp_servers: {}
-#  figma:
-#    url: http://127.0.0.1:3845/mcp
-#  atlassian:
-#    url: https://mcp.atlassian.com/v1/sse
-#  github:
-#    url: https://api.githubcopilot.com/mcp/
-#    headers: {Authorization: "Bearer ${GITHUB_TOKEN}"}
+# GitHub and Jira need no MCP server: the factory and the agent use the `gh` and `twg` CLIs with each dev's own login.
+mcp_servers:
+  figma:
+    url: http://127.0.0.1:3845/mcp   # Figma desktop app → Preferences → Enable Dev Mode MCP Server; no token
+#  Servers that need a secret reference it, never hold it:
+#  internal:
+#    url: https://mcp.example.com/mcp
+#    headers: {Authorization: "Bearer ${INTERNAL_MCP_TOKEN}"}

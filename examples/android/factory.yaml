@@ -21,10 +21,8 @@ autonomy:
 
 tracker:
   kind: jira
-  provider: rest
+  provider: twg                    # each dev's own `twg login`; no Jira token in any file
   site: example.atlassian.net
-  email: "${JIRA_EMAIL}"
-  token: "${JIRA_API_TOKEN}"
   projects: [DEMO]
   transitions: {start: "In Progress", review: "In Review"}
 
@@ -32,16 +30,12 @@ guardrail:
   commands: ["./gradlew detekt"]
 
 notifications:
-  slack_webhook: "${SLACK_WEBHOOK_URL}"
+  slack_webhook: "${SLACK_WEBHOOK_URL:-}"   # optional team webhook
 
 viz:
   pixel_agents: true
 
+# GitHub and Jira go through the `gh` and `twg` CLIs; only Figma needs an MCP server, and it needs no token.
 mcp_servers:
   figma:
     url: http://127.0.0.1:3845/mcp
-  atlassian:
-    url: https://mcp.atlassian.com/v1/sse
-  github:
-    url: https://api.githubcopilot.com/mcp/
-    headers: {Authorization: "Bearer ${GITHUB_TOKEN}"}

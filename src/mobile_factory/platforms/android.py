@@ -46,7 +46,8 @@ class Android(Platform):
 
     def doctor(self) -> list[Check]:
         checks = [Check(f"{t} on PATH", has(t), "" if has(t) else f"install {t}") for t in ("adb", "java")]
-        checks.append(Check("gradle wrapper", (self.root / "gradlew").is_file(), "no ./gradlew in repo root"))
+        wrapper = (self.root / "gradlew").is_file()
+        checks.append(Check("gradle wrapper", wrapper, "" if wrapper else "no ./gradlew in repo root"))
         checks.append(
             Check(
                 "maestro",

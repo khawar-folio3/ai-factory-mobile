@@ -24,6 +24,11 @@ def authenticated(root: Path) -> bool:
     return run(["gh", "auth", "status"], root).ok
 
 
+def login(root: Path) -> str:
+    r = run(["gh", "api", "user", "--jq", ".login"], root)
+    return r.out.strip() if r.ok else ""
+
+
 def push(root: Path, remote: str, branch: str) -> None:
     r = run(["git", "push", "--quiet", "-u", remote, f"HEAD:refs/heads/{branch}"], root)
     if not r.ok:

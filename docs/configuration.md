@@ -14,22 +14,18 @@ Loading `factory.yaml` fails if any secret-looking key (`token`, `secret`, `pass
 `webhook`) holds a literal, or if any value looks like a known token format (GitHub, Slack, Atlassian, Figma, AWS…).
 
 ```bash
-factory secrets set JIRA_API_TOKEN     # prompts without echo, writes 0600
+factory secrets set SLACK_WEBHOOK_URL  # prompts without echo, writes 0600
 factory secrets list                   # names only: set (file) / set (env) / MISSING
 factory exec -- claude                 # run any tool with the secrets in its environment
 ```
 
 ## MCP servers
 
-Declare them once:
+GitHub and Jira need no MCP server: the factory and the agent use the `gh` and `twg` CLIs with each dev's own login.
 
 ```yaml
 mcp_servers:
-  figma:     {url: http://127.0.0.1:3845/mcp}           # Figma desktop app's local server
-  atlassian: {url: https://mcp.atlassian.com/v1/sse}
-  github:
-    url: https://api.githubcopilot.com/mcp/
-    headers: {Authorization: "Bearer ${GITHUB_TOKEN}"}
+  figma:     {url: http://127.0.0.1:3845/mcp}           # Figma desktop app's local server, no token
   internal:
     command: npx
     args: [-y, "@acme/internal-mcp"]

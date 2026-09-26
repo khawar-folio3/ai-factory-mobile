@@ -61,6 +61,18 @@ if your organisation requires it (Figma desktop → Design file → Dev Mode →
 MCP server). Either way, useful volume needs a **Dev or Full seat on a paid plan** (Professional: 200 calls/day);
 Starter allows 20 calls per month.
 
+## Removing the factory from a repo
+
+```bash
+factory uninstall --dry-run     # list what would go
+factory uninstall               # asks once, then removes it
+```
+
+Removes `factory.yaml`, `.factory/` (runs, local settings), the installed skills and Cursor rules, the factory's MCP
+entries, the Mobile Factory block in `CLAUDE.md` / `AGENTS.md`, and its `.gitignore` / `.git/info/exclude` lines.
+Your own content in those files stays. It refuses while a run is open (`--force` to override). The `factory` command
+and your secrets file are machine-wide and stay.
+
 ## Optional secrets
 
 Only needed if the repo's `factory.yaml` references them; `factory secrets list` shows which are missing.

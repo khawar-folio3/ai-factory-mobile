@@ -121,7 +121,7 @@ as a character: steps are tools it works on, gates are permission prompts it wai
 
 | | |
 |---|---|
-| `setup`, `init`, `install`, `doctor`, `secrets set/list`, `exec --` | setup |
+| `setup`, `init`, `install`, `doctor`, `secrets set/list`, `exec --`, `uninstall` | setup |
 | `run <KEY>`, `next`, `submit <node> <file>`, `schema <node>`, `resume` | the agent loop |
 | `gate`, `approve <gate>`, `reject <gate>`, `abort` | humans |
 | `status`, `risk`, `events`, `metrics` | visibility |

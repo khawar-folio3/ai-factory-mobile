@@ -13,6 +13,7 @@ import typer
 
 from . import __version__, adapters, config, doctor, events, metrics
 from . import setup as machine
+from . import uninstall as remover
 from .errors import FactoryError, Refused
 from .evals import Evals, report
 from .gitops import Git
@@ -151,6 +152,31 @@ def init(
     if res.todo:
         _say("\nstill to do:\n" + "\n".join(f"  - {t}" for t in res.todo))
     _say("\nnext: `factory doctor`, then `factory install --target claude|cursor` (lead: commit the result)")
+
+
+@app.command()
+def uninstall(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+    force: bool = typer.Option(False, help="Remove even if a run is still open."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be removed."),
+) -> None:
+    """Remove the factory from this repo: config, .factory/, installed skills/rules, MCP entries, ignore lines."""
+    try:
+        root = config.find_root()
+    except FactoryError:
+        root = Path.cwd()  # half-removed repo: clean what is left
+    rm = remover.plan(root)
+    _say(rm.render(root))
+    if not (rm.delete or rm.edit) or dry_run:
+        return
+    if rm.open_runs and not force:
+        raise FactoryError(f"open runs {', '.join(rm.open_runs)}: finish or `factory abort` them, or pass --force")
+    if not yes:
+        _human_only("factory uninstall")
+        if not typer.confirm("Remove all of the above?", default=False):
+            raise typer.Exit(1)
+    remover.apply(root, rm)
+    _say("removed. Machine-wide items stay: the `factory` command and ~/.config/mobile-factory/secrets.env")
 
 
 @app.command()

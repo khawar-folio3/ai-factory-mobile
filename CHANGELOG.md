@@ -15,6 +15,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Guided `factory init`: asks one question at a time and verifies each answer (Jira site and sign-in via twg or API token, GitHub account with push access, Slack, Figma); shared answers go to `factory.yaml`, per-dev ones to git-ignored `.factory/local.yaml`.
 - Several repos with different Jira sites and GitHub accounts on one machine: `twg --site` per repo and a per-repo GitHub account used for every gh/git call.
 - Figma: remote MCP server by default (sign in on first use, no app or token); desktop server still supported and checked when configured.
+- `factory uninstall`: removes everything the factory added to a repo (with `--dry-run`), keeping the repo's own content in shared files.
 - `factory setup`: installs and logs in to git, gh, twg, JDK, Android Studio, adb and Figma, one confirmation per step; twg installer configurable per repo.
 - Single `factory.yaml` with `${VAR}` secrets, per-machine secrets file, plaintext-secret refusal, `factory exec`.
 - Claude Code and Cursor adapters (skills/rules, MCP config, agent instructions block).

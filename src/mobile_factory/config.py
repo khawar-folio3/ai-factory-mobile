@@ -130,6 +130,15 @@ class VizConfig(_Model):
     pixel_agents: bool = False
 
 
+class ToolOverride(_Model):
+    install: str = ""
+    skip: bool = False
+
+
+class SetupConfig(_Model):
+    tools: dict[str, ToolOverride] = Field(default_factory=dict)
+
+
 class McpServer(_Model):
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
@@ -157,6 +166,7 @@ class FactoryConfig(_Model):
     guardrail: GuardrailConfig = Field(default_factory=GuardrailConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     viz: VizConfig = Field(default_factory=VizConfig)
+    setup: SetupConfig = Field(default_factory=SetupConfig)
     mcp_servers: dict[str, McpServer] = Field(default_factory=dict)
     secrets_file: str = DEFAULT_SECRETS_FILE
 

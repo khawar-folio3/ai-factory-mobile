@@ -43,15 +43,13 @@ Requires Python 3.11+, `git`, `gh` (authenticated), and for Android: `adb`, a JD
 ## Quick start
 
 ```bash
-gh auth login --web                   # GitHub: your own login, no token to paste
-twg login                             # Jira via the Atlassian twg CLI (or tracker.provider: rest with an API token)
 cd your-android-app
-factory init                          # writes factory.yaml with detected modules, applicationId, launcher, base branch
+factory init                          # installs + logs in to gh, twg, JDK, Android tools, Figma; then writes factory.yaml
 factory doctor                        # tools, logins (and which account acts for you), device
 factory install --target all          # skills + MCP config for Claude Code (.claude/, .mcp.json) and Cursor (.cursor/)
 ```
 
-A repo set up once by the lead needs only the logins and `factory doctor` on each new machine: see
+A repo set up once by the lead needs only `factory setup` and `factory doctor` on each new machine: see
 [docs/onboarding.md](docs/onboarding.md).
 
 Then ask the agent: *"fix APP-123 with the factory"*. The agent loops `factory next` → does the step → `factory submit`.
@@ -123,7 +121,7 @@ as a character: steps are tools it works on, gates are permission prompts it wai
 
 | | |
 |---|---|
-| `init`, `install`, `doctor`, `secrets set/list`, `exec --` | setup |
+| `setup`, `init`, `install`, `doctor`, `secrets set/list`, `exec --` | setup |
 | `run <KEY>`, `next`, `submit <node> <file>`, `schema <node>`, `resume` | the agent loop |
 | `gate`, `approve <gate>`, `reject <gate>`, `abort` | humans |
 | `status`, `risk`, `events`, `metrics` | visibility |

@@ -77,6 +77,13 @@ notifications:
 viz:
   pixel_agents: false
 
+# `factory setup` (also run by `factory init`) installs and logs in to git, gh, twg, a JDK, Android Studio, adb and
+# Figma on each dev's machine. twg ships from a company installer: put its one-line install command here once.
+setup:
+  tools:
+    twg: {install: ""}           # e.g. the command your Atlassian admin gives you
+    # figma: {skip: true}        # skip a tool this repo does not need
+
 # Rendered into .mcp.json (Claude Code) and .cursor/mcp.json (Cursor) by `factory install`.
 # GitHub and Jira need no MCP server: the factory and the agent use the `gh` and `twg` CLIs with each dev's own login.
 mcp_servers:

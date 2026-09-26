@@ -12,6 +12,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Android platform: gradle checks for touched modules, install, uiautomator screen state, snapshots and diff, tap/wait/deeplink, Maestro flows.
 - Trackers: Atlassian `twg` CLI (default, no token), Jira REST, Markdown ticket files.
 - No tokens required by default: GitHub via `gh`, Jira via `twg`, Figma via the desktop MCP server; `factory doctor` shows which accounts act for you.
+- `factory setup` (run by `factory init`): installs and logs in to git, gh, twg, JDK, Android Studio, adb and Figma, one confirmation per step; twg installer configurable per repo.
 - Single `factory.yaml` with `${VAR}` secrets, per-machine secrets file, plaintext-secret refusal, `factory exec`.
 - Claude Code and Cursor adapters (skills/rules, MCP config, agent instructions block).
 - Event stream with Slack and Pixel Agents sinks; metrics; eval harness replaying past tickets.

@@ -11,6 +11,7 @@ from typing import Annotated, Any
 import typer
 
 from . import __version__, adapters, config, doctor, events, metrics
+from . import setup as machine
 from .errors import FactoryError, Refused
 from .evals import Evals, report
 from .gitops import Git
@@ -71,9 +72,47 @@ def version() -> None:
     _say(__version__)
 
 
+def _setup(yes: bool, optional: bool) -> bool:
+    try:
+        cfg = config.load().cfg.setup
+    except FactoryError:
+        cfg = None
+    p = machine.plan(machine.tools(cfg), optional=optional)
+    _say(p.render())
+    if not p.todo:
+        _say("machine ready")
+        return True
+    if os.environ.get("CI") or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _say("\nrun `factory setup` in your own terminal: installs and browser logins need you there")
+        return False
+
+    def confirm(s: machine.Step) -> bool:
+        return yes or typer.confirm(f"{s.action} {s.tool}: {s.command}", default=True)
+
+    return machine.execute(p, confirm, echo=_say)
+
+
 @app.command()
-def init(force: bool = typer.Option(False, help="Overwrite an existing factory.yaml.")) -> None:
-    """Create factory.yaml and .factory/ in the current repo (values detected from the project)."""
+def setup(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Install without asking per tool."),
+    optional: bool = typer.Option(False, help="Also install optional tools (Maestro)."),
+) -> None:
+    """Install and log in to what the factory needs on this machine: git, gh, twg, JDK, Android tools, Figma."""
+    ok = _setup(yes, optional)
+    _say("\nnext: `factory doctor` in your project" if ok else "\nfinish the steps above, then `factory setup` again")
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command()
+def init(
+    force: bool = typer.Option(False, help="Overwrite an existing factory.yaml."),
+    skip_setup: bool = typer.Option(False, help="Do not check or install machine tools first."),
+) -> None:
+    """Set up this machine (tools + logins), then create factory.yaml and .factory/ for the current repo."""
+    if not skip_setup:
+        _say("== machine")
+        _setup(yes=False, optional=False)
+        _say("\n== repo")
     root = Path.cwd()
     for line in do_init(root, force):
         _say(f"  {line}")

@@ -11,8 +11,11 @@ Two jobs, done by different people:
 
 ```bash
 cd your-app
-factory init                  # detects modules, applicationId, launcher, base branch, twg site
+factory init                  # sets up your machine first, then detects modules, applicationId, launcher, base branch, twg site
 ```
+
+Set `setup.tools.twg.install` in `factory.yaml` to your company's twg install command so every dev's
+`factory setup` can install it.
 
 1. Review `factory.yaml`: `base_branch`, `android.variant`, `tracker.projects`, `forbidden_paths`, `local_only_paths`.
 2. `factory guardrail learn --bases <main branch>`, then have your agent distill `.factory/taste.md` with the
@@ -28,21 +31,24 @@ With the defaults, **no token is needed**: Jira goes through the dev's own `twg`
 login, Figma through the desktop app.
 
 ```bash
-# 1. tools (plus Android Studio for the SDK, emulator and a JDK, and Claude Code or Cursor)
-brew install python@3.12 git gh pipx && pipx ensurepath
-
-# 2. the factory
+brew install pipx && pipx ensurepath                               # Homebrew: https://brew.sh
 pipx install git+https://github.com/khawar-folio3/ai-factory-mobile
-
-# 3. logins (browser)
-gh auth login --web           # the GitHub account that can push to the project repo
-twg login                     # your Atlassian account
-
-# 4. Figma: desktop app → Preferences → Enable Dev Mode MCP Server (Dev or Full seat)
-
-# 5. check
-cd your-app && factory doctor
+git clone <project repo> && cd <project>
+factory setup                                                       # installs + logs in, asks before each step
+factory doctor
 ```
+
+`factory setup` checks each tool and offers the fix, one confirmation at a time:
+
+| Tool | Installed with | Then |
+|---|---|---|
+| git, gh | `brew install` | `gh auth login --web` (browser) |
+| twg | the command in `setup.tools.twg.install` (set once by the lead) | `twg login` (browser) |
+| JDK, Android Studio, adb | `brew install --cask temurin@17 / android-studio / android-platform-tools` | open Android Studio once, create an emulator |
+| Figma | `brew install --cask figma` | Figma → Preferences → **Enable Dev Mode MCP Server** (checked on the next run) |
+| Maestro (optional) | official installer, with `factory setup --optional` | |
+
+Re-run it any time; finished steps show `ok`. Claude Code or Cursor you install yourself.
 
 `factory doctor` shows **who** will act for you — `gh authenticated (as <login>)`, `tracker reachable (twg as <name>
 <email>)` — so a wrong account is caught before the first run. `warn` lines are optional.

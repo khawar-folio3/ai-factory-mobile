@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -16,72 +15,78 @@ runner = CliRunner()
 
 
 @pytest.fixture
-def installed(repo: Path) -> Path:
-    with (repo / "factory.yaml").open("a") as f:
-        f.write("mcp_servers:\n  figma: {url: https://mcp.figma.com/mcp}\n")
-    (repo / "CLAUDE.md").write_text("# House rules\nKeep it small.\n")
-    (repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"mine": {"url": "http://keep"}}}))
+def legacy(repo: Path) -> Path:
+    """A repo set up by an older version: factory files and agent integration inside the repo."""
+    (repo / "factory.yaml").write_text(config.config_path(repo).read_text())
+    (repo / ".factory/knowledge").mkdir(parents=True)
+    (repo / ".factory/knowledge/README.md").write_text("tribal\n")
+    (repo / "CLAUDE.md").write_text(
+        "# House rules\nKeep it small.\n\n" + adapters.BLOCK_START + "\nold\n" + adapters.BLOCK_END + "\n"
+    )
+    (repo / ".claude/skills/factory").mkdir(parents=True)
+    (repo / ".claude/skills/factory/SKILL.md").write_text("old skill\n")
     (repo / ".gitignore").write_text("build/\n\n# mobile-factory\n" + "\n".join(GITIGNORE) + "\n")
-    (repo / ".factory/local.yaml").write_text("limits: {max_fix_attempts: 1}\n")
-    exclude = repo / ".git/info/exclude"
-    exclude.write_text("# mine\n*.swp\n/factory.yaml\n/.factory/\n")
-    lc = config.load(repo)
-    adapters.install(lc, "claude")
-    adapters.install(lc, "cursor")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "old factory layout")
     return repo
 
 
-def test_uninstall_removes_only_factory_things(installed: Path) -> None:
-    root = installed
-    rm = remover.plan(root)
-    rendered = rm.render(root)
-    assert "delete  factory.yaml" in rendered and "delete  .factory/" in rendered
-    assert ".mcp.json: remove MCP servers figma" in rendered
-    assert "factory.yaml" in rm.tracked
-
-    remover.apply(root, rm)
-
-    assert not (root / "factory.yaml").exists() and not (root / ".factory").exists()
-    assert not list((root / ".claude").glob("skills/factory*")) if (root / ".claude").exists() else True
-    assert not (root / ".cursor").exists()  # only factory rules and mcp were there
-    assert not (root / "AGENTS.md").exists()  # only the factory block was there
-    assert (root / "CLAUDE.md").read_text() == "# House rules\nKeep it small.\n"
-    assert json.loads((root / ".mcp.json").read_text()) == {"mcpServers": {"mine": {"url": "http://keep"}}}
-    assert (root / ".gitignore").read_text() == "build/\n"
-    assert (root / ".git/info/exclude").read_text() == "# mine\n*.swp\n"
-    assert remover.plan(root).render(root).startswith("nothing to remove")
+def test_install_moves_an_old_layout_out_of_the_repo(legacy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(legacy)
+    r = runner.invoke(app, ["install", "--target", "claude"])
+    assert r.exit_code == 0, r.output
+    assert not (legacy / ".claude/skills/factory").exists() and not (legacy / "factory.yaml").exists()
+    assert (legacy / "CLAUDE.md").read_text() == "# House rules\nKeep it small.\n"
+    assert (legacy / ".gitignore").read_text() == "build/\n"
+    assert (config.state_dir(legacy) / "knowledge/README.md").read_text() == "tribal\n"  # team files kept, moved
+    assert (adapters.agent_home() / ".claude/skills/factory/SKILL.md").is_file()
+    assert "repo untouched" in r.output
 
 
-def test_cli_dry_run_and_open_run_guard(installed: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(installed)
-    git(installed, "add", "-A")
-    git(installed, "commit", "-q", "-m", "installed")
+def test_uninstall_removes_the_factory_home_and_keeps_the_repo(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = config.state_dir(repo)
+    rm = remover.plan(repo)
+    assert rm.delete == [home] and not rm.tracked
+    assert "delete  ~" in rm.render(repo) or str(home) in rm.render(repo)
+    before = git(repo, "status", "--porcelain")
+    remover.apply(repo, rm)
+    assert not home.exists() and git(repo, "status", "--porcelain") == before
+    assert remover.plan(repo).render(repo).startswith("nothing to remove")
+
+
+def test_keep_home_and_global_options(repo: Path) -> None:
+    adapters.install(config.load(repo), "claude")
+    assert remover.plan(repo, home=False).delete == []
+    rm = remover.plan(repo, home=False, global_=True)
+    assert any(p.name == "factory" for p in rm.delete) and any(p.name == "factory-fix.md" for p in rm.delete)
+
+
+def test_cli_dry_run_and_open_run_guard(repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(repo)
     assert runner.invoke(app, ["run", "APP-1"]).exit_code == 0
+    home = config.state_dir(repo)
 
     r = runner.invoke(app, ["uninstall", "--dry-run"])
-    assert r.exit_code == 0 and "delete  factory.yaml" in r.output
-    assert (installed / "factory.yaml").exists()
+    assert r.exit_code == 0 and "delete" in r.output and home.exists()
 
     r = runner.invoke(app, ["uninstall", "--yes"])
-    assert r.exit_code != 0 and (installed / "factory.yaml").exists()  # open run blocks it
+    assert r.exit_code != 0 and home.exists()  # open run blocks it
 
     r = runner.invoke(app, ["uninstall", "--yes", "--force"])
     assert r.exit_code == 0, r.output
-    assert not (installed / "factory.yaml").exists()
+    assert not home.exists()
 
 
-def test_uninstall_needs_confirmation_from_a_human(installed: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(installed)
+def test_uninstall_needs_confirmation_from_a_human(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(repo)
     r = runner.invoke(app, ["uninstall"])  # CliRunner is not a TTY
-    assert r.exit_code != 0 and (installed / "factory.yaml").exists()
+    assert r.exit_code != 0 and config.config_path(repo).exists()
 
 
-def test_gitignore_restored_byte_for_byte(repo: Path) -> None:
+def test_old_gitignore_lines_removed_byte_for_byte(repo: Path) -> None:
     (repo / ".gitignore").write_text("build/\n/.cursor")  # committed without a final newline
-    git(repo, "commit", "-q", "-am", "gitignore")
-    from mobile_factory.init import init as do_init
-
-    do_init(repo, force=True)
-    assert "# mobile-factory" in (repo / ".gitignore").read_text()
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "gitignore")
+    (repo / ".gitignore").write_text("build/\n/.cursor\n\n# mobile-factory\n" + "\n".join(GITIGNORE) + "\n")
     remover.apply(repo, remover.plan(repo))
     assert (repo / ".gitignore").read_text() == "build/\n/.cursor"

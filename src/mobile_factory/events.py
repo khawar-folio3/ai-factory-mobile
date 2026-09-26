@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -68,68 +67,6 @@ def slack_sink(webhook: str) -> Sink:
         _post(webhook, {"text": text})
 
     return sink
-
-
-class PixelAgentsSink:
-    """Pixel Agents compat bridge: replays factory events as Claude-Code-shaped hook payloads to every live
-    Pixel Agents server (~/.pixel-agents/servers/*.json). Nodes appear as tools, gates as permission prompts."""
-
-    home = Path.home() / ".pixel-agents"
-
-    def __init__(self, cwd: Path) -> None:
-        self.cwd = str(cwd)
-
-    def servers(self) -> list[dict[str, Any]]:
-        files = sorted((self.home / "servers").glob("*.json")) or [self.home / "server.json"]
-        live = []
-        for f in files:
-            try:
-                s = json.loads(f.read_text())
-                os.kill(int(s["pid"]), 0)
-                live.append(s)
-            except (OSError, ValueError, KeyError):
-                continue
-        return live
-
-    def payloads(self, ev: Event) -> list[dict[str, Any]]:
-        base = {"session_id": f"factory-{ev['run']}", "cwd": self.cwd}
-        t = ev["type"]
-        if t == RUN_STARTED:
-            return [{**base, "hook_event_name": "SessionStart", "source": "mobile-factory"}]
-        if t == NODE_STARTED:
-            return [
-                {
-                    **base,
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": f"factory:{ev['node']}",
-                    "tool_input": {"description": ev.get("title", ev["node"])},
-                }
-            ]
-        if t in (NODE_COMPLETED, NODE_FAILED, GATE_DECIDED):
-            return [{**base, "hook_event_name": "PostToolUse"}]
-        if t == GATE_WAITING:
-            return [{**base, "hook_event_name": "Notification", "notification_type": "permission_prompt"}]
-        if t == AGENT_WAITING:
-            return [{**base, "hook_event_name": "Stop"}]
-        if t == RUN_FINISHED:
-            return [
-                {**base, "hook_event_name": "Stop"},
-                {**base, "hook_event_name": "SessionEnd", "reason": ev.get("outcome")},
-            ]
-        return []
-
-    def __call__(self, ev: Event) -> None:
-        for body in self.payloads(ev):
-            for s in self.servers():
-                try:
-                    _post(
-                        f"http://127.0.0.1:{s['port']}/api/hooks/claude",
-                        body,
-                        {"Authorization": f"Bearer {s['token']}"},
-                        timeout=1.0,
-                    )
-                except OSError:
-                    continue
 
 
 def read(log: Path, run_id: str | None = None) -> list[Event]:

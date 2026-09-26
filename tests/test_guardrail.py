@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from mobile_factory.config import ProjectConfig
+from mobile_factory.errors import FactoryError
 from mobile_factory.globs import glob_to_re, matches
 from mobile_factory.guardrail import diff as difflib
 from mobile_factory.guardrail import limits
@@ -120,3 +122,57 @@ def test_limits() -> None:
 
 def test_matches_ignores_blank_globs() -> None:
     assert not matches("a.kt", ["", "  "])
+
+
+def test_reviews_split_into_parallel_chunks(tmp_path: Path) -> None:
+    from mobile_factory.guardrail import harvest
+
+    data = tmp_path / ".factory/data"
+    data.mkdir(parents=True)
+    (data / "reviews.jsonl").write_text("{}\n" * 1000)
+    assert harvest.chunks(data) == [(i, i + 124) for i in range(1, 1001, 125)]  # 8 subagents
+    (data / "reviews.jsonl").write_text("{}\n" * 150)
+    assert harvest.chunks(data) == [(1, 100), (101, 150)]  # never below 100 lines each
+    plan = harvest.parallel_plan(data)
+    assert f"factory-learn-tally  lines 101-150  ->  {data}/tally-2.json  (description: tally 2)" in plan
+
+
+def test_harvest_skips_processed_prs_and_full_starts_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mobile_factory.guardrail import harvest
+
+    listed = [
+        {"number": n, "title": "t", "author": {"login": "a"}, "mergedAt": f"2026-09-{n:02d}T00:00:00Z"} for n in (1, 2)
+    ]
+    fetched: list[int] = []
+
+    def comments(root: Path, repo: str, pr: dict[str, object]) -> list[dict[str, object]]:
+        n = int(str(pr["number"]))
+        fetched.append(n)
+        return [
+            {"id": f"c{n}", "pr": n, "reviewer": "owner", "kind": "review", "state": "COMMENTED", "created_at": str(n)}
+        ]
+
+    monkeypatch.setattr(harvest, "gh_json", lambda root, *args: listed)
+    monkeypatch.setattr(harvest, "_pr_comments", comments)
+    monkeypatch.setattr(harvest, "codeowners", lambda root: ["owner"])
+    data = tmp_path / "data"
+    run = lambda **kw: harvest.harvest(tmp_path, "o/r", data, min_prs=1, **kw)  # noqa: E731
+
+    assert run()["prs_new"] == 2 and sorted(fetched) == [1, 2]
+    listed.append({"number": 3, "title": "t", "author": {"login": "a"}, "mergedAt": "2026-09-03T00:00:00Z"})
+    meta = run()
+    assert sorted(fetched) == [1, 2, 3] and meta["prs_already_processed"] == 2 and meta["comments"] == 3  # only #3 read
+    assert set(json.loads((data / "processed_prs.json").read_text())["prs"]) == {"1", "2", "3"}
+
+    (data / "tally-1.json").write_text("{}")
+    meta = run(full=True)
+    assert (
+        sorted(fetched[3:]) == [1, 2, 3]
+        and meta["full"]
+        and meta["comments"] == 3
+        and not (data / "tally-1.json").exists()
+    )
+
+    with pytest.raises(FactoryError, match="only 0 PRs"):  # different owners: kept comments are useless, start over
+        run(owners=["someone-else"])
+    assert sorted(fetched[6:]) == [1, 2, 3] and json.loads((data / "harvest_meta.json").read_text())["full"]

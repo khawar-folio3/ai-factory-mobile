@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field
 
-from ..config import TrackerConfig
+from ..config import TrackerConfig, state_dir
 from ..errors import ConfigError, FactoryError
 from ..proc import run
 
@@ -135,10 +135,10 @@ class Tracker:
 
 
 class FileTracker(Tracker):
-    """Tickets as YAML/Markdown files: `.factory/tickets/<KEY>.yaml` or `<KEY>.md` (front matter optional)."""
+    """Tickets as YAML/Markdown files in the factory home: `tickets/<KEY>.yaml` or `<KEY>.md` (front matter optional)."""
 
     def __init__(self, root: Path) -> None:
-        self.dir = root / ".factory" / "tickets"
+        self.dir = state_dir(root) / "tickets"
 
     def get(self, key: str) -> Ticket:
         for ext in (".yaml", ".yml", ".md"):

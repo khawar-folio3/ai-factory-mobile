@@ -9,7 +9,7 @@ Output: `factory schema reproduce`. Snapshots go to `<run>/snapshots/before/<lab
    - the control the ticket is about: `factory android tap "<label>"` (exact text, then contains)
    - fast path: `factory android open <deeplink>` (say which you used; deeplinks can bypass the bug)
    - poll, don't sleep: `factory android wait "<text>" 30`
-   - a Maestro flow in `.factory/flows/` for multi-step paths: `factory android flow <file>`
+   - a Maestro flow in `flows/` of the factory home (HOME line) for multi-step paths: `factory android flow <file>`
 4. At the faulty state: `factory snap before <label>` (label = short, stable: `profile`, `settings-empty`).
    The `.txt` next to the PNG is the diffable state (activity, fragments, visible labels). Read the PNG only for visual defects.
 5. Adjacent screens: every other path that shares the suspected code (same function, same screen class, sibling

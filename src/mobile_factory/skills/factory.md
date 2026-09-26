@@ -22,8 +22,18 @@ factory status | risk | gate | metrics                 read-only views
    - **TASK / SKILL / SUBMIT** → open the SKILL file, do the task, write the JSON, `factory submit`.
    - **WAITING ON A HUMAN at gate X** → stop. Show the user the gate summary it printed and tell them to run
      `factory approve X` (or `factory reject X --reason ...`) in their own terminal. Do not run it yourself, do not
-     edit `.factory/runs/**`, do not work around it. When they say it's done, `factory next` again.
+     edit the run folder, do not work around it. When they say it's done, `factory next` again.
    - **stopped / done** → report the outcome line and the stop reason or PR URL. Nothing else to do.
+   - **(description: …)** after a subagent → pass exactly that as the subagent's description: it is its short
+     on-screen label in the visualiser.
+   - **PARALLEL** lines → start every listed subagent in ONE message so they run at the same time, wait for all of
+     them, then continue with the THEN / AGENT line. Never run independent parts one after another when you can fan out.
+   - **ALONGSIDE** line → start that read-only helper in the SAME message as the step's own subagent; its file feeds a
+     later step (e.g. `locate` maps the code while `reproduce` uses the device). Don't wait on it to submit the step.
+   - **HINT** line → pass that file to the step's subagent.
+   - **AGENT** line → hand the step to that subagent (its model is set per step in `factory.yaml` → `agents.models`),
+     giving it the RUN dir and the JSON path to write; then submit that file. Claude Code and Cursor (2.4+) both have
+     subagents; only if yours has none, do the step and the parts yourself, one after another.
 2. After every submit, read the output: the runner may send you back (e.g. to `fix` after a failed check, with a
    LAST FAILURE line) or forward. Follow what it says, not what you expected.
 3. A submit rejected with a validation error → fix the JSON and submit again. It never counts as an attempt.

@@ -1,6 +1,6 @@
 # Tribal knowledge
 
-Rules the team knows but no linter enforces. Same format as `.factory/taste.md`; the guardrail loads a rule only when
+Rules the team knows but no linter enforces. Same format as `taste.md`; the guardrail loads a rule only when
 its `applies` globs match a changed file (and, if given, its `keywords` regex hits an added line).
 IDs use the `K` prefix and never change once published.
 

@@ -30,8 +30,8 @@ def accounts() -> list[str]:
 
 
 def account_env(account: str) -> dict[str, str]:
-    """Env that makes gh and HTTPS git act as `account` for this process only (active gh account untouched).
-    SSH remotes still push with whatever SSH key matches."""
+    """Env that makes gh and git act as `account` for this process only (active gh account and SSH keys untouched).
+    SSH remotes are rewritten to HTTPS so the account's gh login, not whichever SSH key loads first, is used."""
     if not account:
         return {}
     r = run(["gh", "auth", "token", "--user", account])
@@ -40,11 +40,15 @@ def account_env(account: str) -> dict[str, str]:
     helper = "credential.https://github.com.helper"
     return {
         "GH_TOKEN": r.out.strip(),
-        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_COUNT": "4",
         "GIT_CONFIG_KEY_0": helper,
         "GIT_CONFIG_VALUE_0": "",
         "GIT_CONFIG_KEY_1": helper,
         "GIT_CONFIG_VALUE_1": "!gh auth git-credential",
+        "GIT_CONFIG_KEY_2": "url.https://github.com/.insteadOf",
+        "GIT_CONFIG_VALUE_2": "git@github.com:",
+        "GIT_CONFIG_KEY_3": "url.https://github.com/.insteadOf",
+        "GIT_CONFIG_VALUE_3": "ssh://git@github.com/",
     }
 
 

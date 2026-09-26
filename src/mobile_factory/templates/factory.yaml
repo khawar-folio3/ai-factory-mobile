@@ -1,4 +1,4 @@
-# Mobile Factory configuration. Commit this file; it must never hold a secret.
+# Mobile Factory settings for this repo. Lives in your factory home, never in the repo; it must never hold a secret.
 # Secrets are ${VAR} references resolved from the environment or the per-machine secrets file
 # (default ~/.config/mobile-factory/secrets.env, set with `factory secrets set VAR`).
 version: 1
@@ -47,7 +47,7 @@ limits:
   rollback_on_fail: true
 
 tracker:
-  kind: __TRACKER_KIND__                     # jira | file (.factory/tickets/<KEY>.md, no Jira needed)
+  kind: __TRACKER_KIND__                     # jira | file (tickets/<KEY>.md in the factory home, no Jira needed)
   provider: twg                  # twg: each dev's own `twg login`, no token here
   site: "__JIRA_SITE__"                       # acme.atlassian.net
   # Without twg, use Jira REST instead (needs two secrets per dev):
@@ -66,19 +66,19 @@ vcs:
   forbid_attribution: true
 
 guardrail:
-  taste: .factory/taste.md       # learned from past PR reviews: factory guardrail learn
-  knowledge: .factory/knowledge  # tribal knowledge, same rule format, hand-written
-  slop: true                     # deterministic AI-slop detectors (override in .factory/slop.yaml)
+  taste: taste.md                # learned from past PR reviews: factory guardrail learn
+  knowledge: knowledge           # tribal knowledge, same rule format, hand-written
+  slop: true                     # deterministic AI-slop detectors (override in slop.yaml)
   commands: []                   # extra checks, e.g. ["./gradlew detekt"]
 
 notifications:
-  slack_webhook: ""              # each dev's own webhook reference goes in .factory/local.yaml (factory init asks)
+  slack_webhook: ""              # each dev's own webhook reference goes in local.yaml next to this file (factory init asks)
 
 viz:
   pixel_agents: false
 
 # `factory init` / `factory setup` install and log in to git, gh, twg, a JDK, Android Studio, adb and Figma.
-# Per-dev answers (twg installer, GitHub account, Jira auth, Slack webhook) go to .factory/local.yaml, never here.
+# Per-dev answers (twg installer, GitHub account, Jira auth, Slack webhook) go to local.yaml next to this file, never here.
 setup:
   tools: {}                      # e.g. {figma: {skip: true}} for a repo that does not need a tool
 

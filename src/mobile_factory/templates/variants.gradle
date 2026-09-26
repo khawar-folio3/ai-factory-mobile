@@ -1,0 +1,12 @@
+// Init script used by `factory init`: prints every app variant with its final application id.
+allprojects {
+    plugins.withId("com.android.application") {
+        def ids = [:]
+        extensions.getByName("androidComponents").with { ext ->
+            ext.onVariants(ext.selector().all()) { v -> ids[v.name] = v.applicationId }
+        }
+        tasks.register("factoryVariants") {
+            doLast { ids.each { name, id -> println("factory-variant ${name} ${id.get()}") } }
+        }
+    }
+}

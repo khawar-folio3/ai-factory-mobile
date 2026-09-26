@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import stat
 import sys
+from pathlib import Path
 
+from . import viz
 from .config import LoadedConfig, env_refs, secrets_path
 from .errors import FactoryError
 from .integrations import github, tracker
 from .platforms import make as make_platform
 from .platforms.base import Check
 from .proc import has, run
+from .uninstall import LEGACY_REPO_FILES
 
 
 def checks(lc: LoadedConfig, online: bool = True) -> list[Check]:
@@ -34,11 +37,32 @@ def checks(lc: LoadedConfig, online: bool = True) -> list[Check]:
         )
     )
 
-    ignored = run(["git", "check-ignore", "-q", ".factory/runs/probe"], lc.root).ok  # .gitignore or info/exclude
+    leftovers = [p for p in LEGACY_REPO_FILES if (lc.root / p).exists()]
     out.append(
-        Check(".factory/runs ignored by git", ignored, "" if ignored else "add .factory/runs/ and .factory/data/")
+        Check(
+            "nothing in the repo",
+            not leftovers,
+            str(lc.state_dir).replace(str(Path.home()), "~")
+            if not leftovers
+            else f"old files: {', '.join(leftovers)} -> `factory install` moves them out",
+        )
     )
-    has_taste = (lc.root / c.guardrail.taste).is_file()
+    v = viz.make(c.viz)
+    if not isinstance(v, viz.NullVisualizer):
+        live = v.offices()
+        hint = live[0].url if live else "`factory viz start` (or `factory init`)"
+        out.append(Check(f"{v.title} running", bool(live), hint, optional=True))
+        if live and v.supports_live_hooks:
+            hooked = v.live_hooks()
+            out.append(
+                Check(
+                    "live hooks",
+                    hooked,
+                    "" if hooked else "open the office link, then Settings → Instant Detection (Hooks) → on",
+                    optional=True,
+                )
+            )
+    has_taste = lc.path(c.guardrail.taste).is_file()
     hint = "none yet: `factory guardrail learn`; until then only detectors and knowledge apply"
     out.append(Check("taste rules", has_taste, "" if has_taste else hint, optional=True))
 
@@ -47,7 +71,13 @@ def checks(lc: LoadedConfig, online: bool = True) -> list[Check]:
         out.append(Check("gh authenticated", bool(login), f"as {login}" if login else "gh auth login --web"))
         if c.project.base_branch not in ("", "ask"):
             ok = run(["git", "ls-remote", "--exit-code", "--heads", c.vcs.remote, c.project.base_branch], lc.root).ok
-            out.append(Check(f"base branch {c.project.base_branch}", ok, f"not found on {c.vcs.remote}"))
+            out.append(
+                Check(
+                    f"base branch {c.project.base_branch}",
+                    ok,
+                    "" if ok else f"not found on {c.vcs.remote} (or no access)",
+                )
+            )
         if c.tracker.kind == "jira" and not missing:
             try:
                 out.append(Check("tracker reachable", True, tracker.make(c.tracker, lc.root).ping()))
@@ -61,7 +91,10 @@ def render(results: list[Check]) -> tuple[str, bool]:
     def mark(r: Check) -> str:
         return "ok  " if r.ok else ("warn" if r.optional else "FAIL")
 
-    lines = [f"{mark(r)}  {r.name}" + (f"  ({r.detail})" if r.detail else "") for r in results]
+    def detail(d: str) -> str:  # a bare URL, so terminals make it clickable without a trailing ")"
+        return f"  {d}" if d.startswith("http") else f"  ({d})"
+
+    lines = [f"{mark(r)}  {r.name}" + (detail(r.detail) if r.detail else "") for r in results]
     ok = all(r.ok or r.optional for r in results)
     lines.append("DOCTOR: PASS" if ok else "DOCTOR: FAIL")
     return "\n".join(lines), ok

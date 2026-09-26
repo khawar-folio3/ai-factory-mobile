@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -136,7 +137,20 @@ def harvest(
     since: str = "",
     jobs: int = 8,
     min_prs: int = 20,
+    progress: Callable[[str, int, int], None] | None = None,
+    full: bool = False,
 ) -> dict[str, Any]:
+    """Incremental by default: PRs in processed_prs.json are never fetched again. `full` invalidates everything first."""
+    tick = progress or (lambda phase, done, total: None)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    record_file = data_dir / "processed_prs.json"
+    record: dict[str, Any] = json.loads(record_file.read_text()) if record_file.is_file() and not full else {}
+    if owners and record.get("owners") and {o.lower() for o in owners} != {o.lower() for o in record["owners"]}:
+        record, full = {}, True  # other reviewers' comments were never kept: an incremental run would miss them
+    if full:
+        invalidate(data_dir)
+    done_prs: dict[str, str] = record.get("prs", {})
+    tick("Listing merged PRs", 0, 0)
     prs: dict[int, dict[str, Any]] = {}
     for b in bases or [""]:
         args = [
@@ -155,10 +169,17 @@ def harvest(
             if p["mergedAt"][:10] >= since:
                 prs[p["number"]] = p
 
+    new = {n: p for n, p in prs.items() if str(n) not in done_prs}
+    raw: list[dict[str, Any]] = []
+    tick("Reading review comments", 0, len(new))
     with ThreadPoolExecutor(jobs) as ex:
-        raw = [c for batch in ex.map(lambda p: _pr_comments(root, repo, p), prs.values()) for c in batch]
+        for i, batch in enumerate(ex.map(lambda p: _pr_comments(root, repo, p), new.values()), 1):
+            raw += batch
+            tick("Reading review comments", i, len(new))
 
     source = "flag"
+    if not owners and record.get("owners"):
+        owners, source = record["owners"], record.get("owner_source", "recorded")
     if not owners:
         owners, source = codeowners(root), "CODEOWNERS"
     if not owners:
@@ -171,16 +192,17 @@ def harvest(
     kept = [c for c in raw if c["reviewer"].lower() in wanted]
 
     inline_prs = sorted({c["pr"] for c in kept if c["kind"] == "inline"})
+    tick("Resolving review threads", 0, len(inline_prs))
     with ThreadPoolExecutor(jobs) as ex:
         threads: dict[str, dict[str, Any]] = {}
-        for t in ex.map(lambda n: _threads(root, repo, n), inline_prs):
+        for i, t in enumerate(ex.map(lambda n: _threads(root, repo, n), inline_prs), 1):
             threads.update(t)
+            tick("Resolving review threads", i, len(inline_prs))
     for c in kept:
         c["resolution"] = threads.get(c["id"])
 
-    data_dir.mkdir(parents=True, exist_ok=True)
     out = data_dir / "reviews.jsonl"
-    merged = {c["id"]: c for c in (_read_jsonl(out) if since else [])}
+    merged = {c["id"]: c for c in _read_jsonl(out)}  # invalidate() already emptied it for a full run
     merged.update({c["id"]: c for c in kept})
     rows = sorted(merged.values(), key=lambda c: c["created_at"] or "")
     out.write_text("".join(json.dumps(c) + "\n" for c in rows))
@@ -194,15 +216,73 @@ def harvest(
         "owners": owners,
         "owner_source": source,
         "prs_scanned": len(prs),
+        "prs_new": len(new),
+        "prs_already_processed": len(prs) - len(new),
+        "full": full,
         "prs_with_owner_comments": reviewed,
         "comments": len(rows),
         "changes_requested": sum(1 for c in rows if c["state"] == "CHANGES_REQUESTED"),
     }
     (data_dir / "harvest_meta.json").write_text(json.dumps(meta, indent=2))
+    done_prs.update({str(n): p["mergedAt"][:10] for n, p in new.items()})
+    record_file.write_text(
+        json.dumps({"repo": repo, "owners": owners, "owner_source": source, "prs": done_prs}, indent=1) + "\n"
+    )
     if reviewed < min_prs:
         raise FactoryError(f"only {reviewed} PRs with owner comments (< {min_prs}): not enough history to learn from")
     return meta
 
 
+def invalidate(data_dir: Path) -> None:
+    """Forget every harvested comment and processed PR so the next harvest extracts from scratch."""
+    for name in ("reviews.jsonl", "processed_prs.json", "harvest_meta.json", DISTILLED, "reviews-new.jsonl"):
+        (data_dir / name).unlink(missing_ok=True)
+    for tally in data_dir.glob("tally-*.json"):
+        tally.unlink()
+
+
 def _read_jsonl(p: Path) -> list[dict[str, Any]]:
     return [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()] if p.is_file() else []
+
+
+MAX_PARALLEL = 8  # Cursor runs up to 4 subagents at once; Claude Code more
+
+
+def chunks(data_dir: Path, min_size: int = 100, source: str = "reviews.jsonl") -> list[tuple[int, int]]:
+    """1-based inclusive line ranges of `source`, one per parallel tally subagent."""
+    p = data_dir / source
+    n = sum(1 for ln in p.read_text().splitlines() if ln.strip()) if p.is_file() else 0
+    size = max(min_size, -(-n // MAX_PARALLEL))
+    return [(a, min(a + size - 1, n)) for a in range(1, n + 1, size)]
+
+
+def parallel_plan(data_dir: Path, source: str = "reviews.jsonl") -> str:
+    rel = str(data_dir).replace(str(Path.home()), "~")
+    lines = [
+        f"PARALLEL start ALL of these in one message; each tallies its lines of {rel}/{source}, read-only."
+        " Give each subagent exactly the short description shown: it is its on-screen label"
+    ]
+    lines += [
+        f"  factory-learn-tally  lines {a}-{b}  ->  {rel}/tally-{i}.json  (description: tally {i})"
+        for i, (a, b) in enumerate(chunks(data_dir, source=source), 1)
+    ]
+    lines.append("THEN     cluster every tally file into the taste rules file (guardrail-learn skill, steps 4-6)")
+    return "\n".join(lines)
+
+
+DISTILLED = "distilled_ids.json"  # comment ids the current taste rules were built from
+
+
+def undistilled(data_dir: Path) -> list[dict[str, Any]]:
+    """Harvested comments the taste rules have not seen yet; written to reviews-new.jsonl for a refresh tally."""
+    rows = _read_jsonl(data_dir / "reviews.jsonl")
+    seen_file = data_dir / DISTILLED
+    seen = set(json.loads(seen_file.read_text())) if seen_file.is_file() else None
+    new = rows if seen is None else [c for c in rows if str(c["id"]) not in seen]
+    (data_dir / "reviews-new.jsonl").write_text("".join(json.dumps(c) + "\n" for c in new))
+    return new
+
+
+def mark_distilled(data_dir: Path) -> None:
+    ids = sorted({str(c["id"]) for c in _read_jsonl(data_dir / "reviews.jsonl")})
+    (data_dir / DISTILLED).write_text(json.dumps(ids) + "\n")

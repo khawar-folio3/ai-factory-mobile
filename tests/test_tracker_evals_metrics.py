@@ -4,7 +4,7 @@ from pathlib import Path
 
 from conftest import FakePlatform, git, load
 
-from mobile_factory import metrics
+from mobile_factory import config, metrics
 from mobile_factory.evals import Evals, report
 from mobile_factory.integrations.tracker import FileTracker, adf_text, from_jira_fields
 from mobile_factory.pipeline import Engine
@@ -57,9 +57,9 @@ def test_eval_case_roundtrip_and_metrics(repo: Path, fake: FakePlatform) -> None
     case = ev.add("APP-1", "HEAD")
     assert case.human_files == ["app/src/main/java/Profile.kt"]
     wt = ev.prepare("APP-1")
-    assert (wt / "factory.yaml").is_file()
+    assert config.config_path(wt) == config.config_path(repo)  # the worktree shares this repo's factory home
     assert "height = 48" in (wt / "app/src/main/java/Profile.kt").read_text()
-    assert git(wt, "status", "--porcelain") == ""  # copied config is excluded, preflight stays clean
+    assert git(wt, "status", "--porcelain") == "" and not (wt / "factory.yaml").exists()  # nothing copied in
 
     eng = Engine.start(load(repo), "APP-2")
     eng.st.outcome, eng.st.status = "draft-pr", "done"

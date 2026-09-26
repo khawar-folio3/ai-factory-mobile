@@ -6,8 +6,21 @@ from typing import Any
 
 import pytest
 
-from mobile_factory import config
+from mobile_factory import adapters, config
 from mobile_factory.platforms.base import Check, CheckRun, Platform
+from mobile_factory.viz.pixel import PixelAgents
+
+
+@pytest.fixture(autouse=True)
+def factory_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Factory and agent homes are throwaway folders: tests never touch the real ~/.config, ~/.claude or ~/.cursor."""
+    home = tmp_path_factory.mktemp("factory-home")
+    monkeypatch.setenv("FACTORY_HOME", str(home))
+    monkeypatch.setenv("FACTORY_AGENT_HOME", str(tmp_path_factory.mktemp("agent-home")))
+    monkeypatch.setattr(adapters, "_register_claude_mcp", lambda root, servers: sorted(servers))  # no ~/.claude.json
+    monkeypatch.setattr(PixelAgents, "home", tmp_path_factory.mktemp("pixel-home"))  # no ~/.pixel-agents
+    return home
+
 
 FACTORY_YAML = """
 version: 1
@@ -100,13 +113,13 @@ def repo(tmp_path: Path) -> Path:
     (work / "app/src/main/java").mkdir(parents=True)
     (work / "app/src/main/java/Profile.kt").write_text("class Profile {\n    val height = 48\n}\n")
     (work / "app/build.gradle.kts").write_text('plugins { id("com.android.application") }\n')
-    (work / ".gitignore").write_text(".factory/runs/\n.factory/data/\n.factory/events.jsonl\n")
-    (work / "factory.yaml").write_text(FACTORY_YAML.format(ceiling=4))
-    (work / ".factory/tickets").mkdir(parents=True)
-    (work / ".factory/tickets/APP-1.md").write_text(TICKET)
     git(work, "add", "-A")
     git(work, "commit", "-q", "-m", "init")
     git(work, "push", "-q", "origin", "main")
+    config.config_path(work).parent.mkdir(parents=True, exist_ok=True)  # the factory lives outside the repo
+    config.config_path(work).write_text(FACTORY_YAML.format(ceiling=4))
+    (config.state_dir(work) / "tickets").mkdir()
+    (config.state_dir(work) / "tickets/APP-1.md").write_text(TICKET)
     return work
 
 
@@ -131,6 +144,5 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> FakePlatform:
 
 def load(repo: Path, ceiling: int | None = None) -> config.LoadedConfig:
     if ceiling is not None:
-        (repo / "factory.yaml").write_text(FACTORY_YAML.format(ceiling=ceiling))
-        git(repo, "commit", "-q", "-am", f"ceiling {ceiling}")
+        config.config_path(repo).write_text(FACTORY_YAML.format(ceiling=ceiling))
     return config.load(repo)

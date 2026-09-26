@@ -9,6 +9,12 @@ You review as the code owner would. Inputs in `<run>/context/`:
 Output: `factory schema review` (a list of findings). Read `diff.patch` in chunks if large; read surrounding source only
 to confirm a finding.
 
+## Parallel parts first
+
+`factory next` lists three read-only parts (`review-correctness`, `review-taste`, `review-detectors`) with their output
+files. They run at the same time; you start once all three files exist. Merge them: one finding per spot (same file, line
+and rule; keep the highest severity), then apply the rules below. If your tool has no subagents, do all three yourself.
+
 ## Rules
 
 1. Added/changed lines only. Every finding cites a rule id from `rules.md` or `detector.json`; anything else uses rule

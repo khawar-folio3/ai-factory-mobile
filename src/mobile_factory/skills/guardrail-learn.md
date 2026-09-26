@@ -1,18 +1,21 @@
-# Guardrail learn — distill the code owner's taste from past PR reviews
+# Guardrail learn — distill the reviewers' taste from past PR reviews
 
 Run `factory guardrail learn [--bases develop,release/x] [--since YYYY-MM-DD]` first. It writes
-`.factory/data/reviews.jsonl` (one owner comment per line, git-ignored: it contains names) and prints counts.
-You turn that into `.factory/taste.md` (committed, reviewed by the owner like code).
+`reviews.jsonl` in the factory home's `data/` folder (path in the PARALLEL plan; one owner comment per line, it
+contains names) and prints counts.
+You turn that into `taste.md` in the factory home. It stays on this machine and never enters the repo.
 
 Each comment: `{id, pr, title, pr_author, merged_at, kind: inline|review, reviewer, state, path, line, diff_hunk, body, resolution}`.
 
-## 1. Read lean
+## 1. Fan out
 
-Never read the whole file. Project and chunk (~60 comments at a time):
+`factory guardrail chunks` prints a PARALLEL plan: one line range of `reviews.jsonl` per `factory-learn-tally`
+subagent. Start them ALL in one message and wait for every `tally-<n>.json`; each part applies steps 2-3 to its lines.
+Then do steps 4-6 yourself from the tally files, merging candidates across chunks by preference (sum comments, union PRs).
+If your tool has no subagents, work the chunks one after another, projected lean, and keep only the tally per chunk:
 ```sh
-jq -c '{pr, state, path, body: (.body[:400]), hunk: (.diff_hunk | split("\n") | .[-4:] | join("\n"))}' .factory/data/reviews.jsonl | sed -n '1,60p'
+jq -c '{pr, state, path, body: (.body[:400]), hunk: (.diff_hunk | split("\n") | .[-4:] | join("\n"))}' <data>/reviews.jsonl | sed -n '1,60p'
 ```
-Keep a tally per chunk (`candidate rule → PR numbers`), not the comments.
 
 ## 2. Drop
 
@@ -31,7 +34,7 @@ Group by the underlying preference, not the wording. Keep a rule with ≥ 2 comm
 review. Cap 60. Severity: `blocker` if the owner requested changes for it at least once; `major` if repeated (≥ 3)
 or about correctness, crashes, leaks, security, architecture; else `nit`.
 
-## 5. Write `.factory/taste.md` (≤ ~4k tokens)
+## 5. Write `taste.md` in the factory home (≤ ~4k tokens)
 
 Header: repo, harvest date, PR window, comment count. No names. Then:
 ```
@@ -54,4 +57,4 @@ evidence: 7 comments · PRs #412 #430 #455
 Matching comment → bump evidence, prepend PR numbers (keep 5). New cluster meeting the threshold → next free id.
 New `CHANGES_REQUESTED` hit → raise to `blocker`. Newest evidence older than 6 months → append `[stale]` to the title.
 
-Finish by showing the rule count per severity and one line per rule, and **stop for code-owner approval**.
+Finish by showing the rule count per severity and one line per rule, and **stop for the developer's review**.

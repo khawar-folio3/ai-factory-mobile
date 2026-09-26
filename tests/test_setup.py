@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from mobile_factory import setup as machine
@@ -94,3 +96,78 @@ def test_figma_mode_follows_the_configured_server() -> None:
     assert figma_mode(cfg("")) == "none"
     assert "figma" in {t.name for t in machine.tools(None, "desktop")}
     assert "figma" not in {t.name for t in machine.tools(None, "remote")}
+
+
+def test_installs_go_to_installer_and_logins_to_the_terminal() -> None:
+    p = machine.Plan(
+        [machine.Step("maestro", "install", "curl maestro"), machine.Step("gh", "login", "gh auth login --web")]
+    )
+    installed: list[str] = []
+    ran: list[str] = []
+    ok = machine.execute(
+        p,
+        lambda s: True,
+        runner=lambda c: ran.append(c) or 0,
+        echo=lambda m: None,
+        installer=lambda s: installed.append(s.command) or 0,
+    )
+    assert ok and installed == ["curl maestro"] and ran == ["gh auth login --web"]
+
+
+def test_only_the_chosen_agent_cli_is_set_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(machine, "LOCAL_BIN", tmp_path)  # no stray ~/.local/bin/claude from this machine
+    names = lambda agents: {t.name for t in machine.tools(agents=agents)}  # noqa: E731
+    assert "claude" in names(["claude"]) and "cursor-cli" not in names(["claude"])
+    assert {"claude", "cursor-cli"} <= names(["claude", "cursor"])
+    claude = next(t for t in machine.tools(agents=["claude"]) if t.name == "claude")
+    assert claude.install == "curl -fsSL https://claude.ai/install.sh | bash" and claude.login == "claude auth login"
+
+
+def test_which_finds_fresh_installs_in_local_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mobile_factory import proc
+
+    tool = tmp_path / "freshcli"
+    tool.write_text("#!/bin/sh\necho hi\n")
+    tool.chmod(0o755)
+    monkeypatch.setattr(proc, "LOCAL_BIN", tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert proc.which("freshcli") == str(tool) and proc.run(["freshcli"]).out.strip() == "hi"
+
+
+def test_broken_claude_link_is_explained(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "claude").symlink_to(tmp_path / "gone/2.1.246/claude")
+    monkeypatch.setattr(machine, "LOCAL_BIN", tmp_path)
+    assert "points to a removed build" in machine._claude_why()
+    claude = next(t for t in machine.tools(agents=["claude"]) if t.name == "claude")
+    assert claude.install == f"rm -f '{tmp_path / 'claude'}' && {machine.CLAUDE_INSTALL}"
+
+
+def test_optional_extras_never_block_machine_ready() -> None:
+    p = machine.Plan([machine.Step("pixel-agents", "install", "npm i -g pixel-agents", soft=True)])
+    assert machine.execute(p, lambda s: True, echo=lambda m: None, installer=lambda s: 1)
+    p = machine.Plan([machine.Step("claude", "install", "curl claude")])
+    assert not machine.execute(p, lambda s: True, echo=lambda m: None, installer=lambda s: 1)
+
+
+def test_outdated_reads_brew_and_npm(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    from mobile_factory.proc import Result
+
+    brew = {
+        "formulae": [{"name": "gh", "installed_versions": ["2.60.0"], "current_version": "2.62.0"}],
+        "casks": [{"name": "android-platform-tools", "installed_versions": ["35.0.1"], "current_version": "36.0.0"}],
+    }
+    npm = {"pixel-agents": {"current": "1.2.0", "latest": "1.4.0"}}
+    monkeypatch.setattr(machine, "has", lambda tool: True)
+    monkeypatch.setattr(
+        machine,
+        "run",
+        lambda cmd, **_: Result(0 if cmd[0] == "brew" else 1, json.dumps(brew if cmd[0] == "brew" else npm), ""),
+    )
+    tools = [machine.Tool(n, "", lambda: True) for n in ("gh", "adb", "git", "pixel-agents")]
+    ups = {u.tool: u for u in machine.outdated(tools)}
+    assert set(ups) == {"gh", "adb", "pixel-agents"}  # git is current
+    assert ups["gh"].command == "brew upgrade gh" and ups["gh"].latest == "2.62.0"
+    assert ups["adb"].command == "brew upgrade --cask android-platform-tools"
+    assert ups["pixel-agents"].command == "npm install --global pixel-agents@latest"

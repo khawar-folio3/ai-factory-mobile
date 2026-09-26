@@ -34,8 +34,8 @@ def build(lc: LoadedConfig, patch: str, out_dir: Path) -> ReviewContext:
     diffs = difflib.parse(clean)
     (out_dir / "diff.patch").write_text(clean)
 
-    knowledge = sorted((lc.root / g.knowledge).glob("*.md")) if (lc.root / g.knowledge).is_dir() else []
-    all_rules, tails = rl.load_rule_files([lc.root / g.taste, *knowledge])
+    knowledge = sorted(lc.path(g.knowledge).glob("*.md")) if lc.path(g.knowledge).is_dir() else []
+    all_rules, tails = rl.load_rule_files([lc.path(g.taste), *knowledge])
     loaded, no_hit = rl.select(all_rules, diffs)
 
     parts = [f"{r.body.strip()}\n(source: {Path(r.source).name})" for r in loaded]
@@ -49,7 +49,7 @@ def build(lc: LoadedConfig, patch: str, out_dir: Path) -> ReviewContext:
         parts.append(f"(no taste rules yet: run `factory guardrail learn` to build {g.taste})")
     (out_dir / "rules.md").write_text("\n\n".join(parts) + "\n")
 
-    found = rl.detect(diffs, rl.slop_rules(lc.root / g.slop_overrides)) if g.slop else []
+    found = rl.detect(diffs, rl.slop_rules(lc.path(g.slop_overrides))) if g.slop else []
     (out_dir / "detector.json").write_text(json.dumps([f.model_dump() for f in found], indent=2))
     return ReviewContext(
         dir=out_dir,

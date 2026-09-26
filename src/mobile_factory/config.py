@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
@@ -11,8 +14,21 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from .errors import ConfigError
 
 CONFIG_NAME = "factory.yaml"
-LOCAL_NAME = ".factory/local.yaml"  # per developer, git-ignored: which accounts and auth this dev uses here
-FACTORY_DIR = ".factory"
+FACTORY_DIR = ".factory"  # legacy in-repo layout; migrated out by state_dir()
+LOCAL_FILE = "local.yaml"  # per developer: which accounts and auth this dev uses for the repo
+# Nothing lives in the repo: every file the factory keeps for a repo moves here from <repo>/.factory on first use.
+LEGACY_STATE = (
+    "local.yaml",
+    "runs",
+    "data",
+    "events.jsonl",
+    "taste.md",
+    "knowledge",
+    "flows",
+    "tickets",
+    "slop.yaml",
+    "evals",
+)
 DEFAULT_SECRETS_FILE = "~/.config/mobile-factory/secrets.env"
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -59,7 +75,7 @@ class AndroidConfig(_Model):
     deeplink_scheme: str = ""
     lint_task: str = "lint{variant}"
     test_task: str = "test{variant}UnitTest"
-    flows_dir: str = ".factory/flows"
+    flows_dir: str = "flows"
 
 
 class AutonomyConfig(_Model):
@@ -117,11 +133,53 @@ class VcsConfig(_Model):
 
 
 class GuardrailConfig(_Model):
-    taste: str = ".factory/taste.md"
-    knowledge: str = ".factory/knowledge"
+    taste: str = "taste.md"
+    knowledge: str = "knowledge"
     slop: bool = True
-    slop_overrides: str = ".factory/slop.yaml"
+    slop_overrides: str = "slop.yaml"
     commands: list[str] = Field(default_factory=list)
+
+
+# haiku | sonnet | opus | inherit, or a full model id. Steps not listed run on the session's model.
+DEFAULT_MODELS = {
+    "triage": "sonnet",
+    "reproduce": "sonnet",
+    "fix": "opus",
+    "verify": "opus",
+    "review": "opus",
+    "review-correctness": "opus",
+    "review-taste": "sonnet",
+    "review-detectors": "haiku",
+    "guardrail-learn": "sonnet",
+    "learn-tally": "sonnet",
+    "locate": "sonnet",
+}
+
+
+class AgentsConfig(_Model):
+    use: list[Literal["claude", "cursor"]] = Field(
+        default_factory=lambda: list[Literal["claude", "cursor"]](["claude"])
+    )  # per developer (local.yaml)
+    models: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_MODELS))
+    parallel: bool = True  # fan independent sub-tasks out to subagents at once (Claude Code, Cursor 2.4+)
+    # Cursor wants its own model ids (Settings → Models); a tier left as "inherit" runs on the chat's model
+    cursor_models: dict[str, str] = Field(
+        default_factory=lambda: {"haiku": "inherit", "sonnet": "inherit", "opus": "inherit"}
+    )
+
+    @field_validator("cursor_models")
+    @classmethod
+    def _merge_default_tiers(cls, v: dict[str, str]) -> dict[str, str]:
+        return {"haiku": "inherit", "sonnet": "inherit", "opus": "inherit", **v}
+
+    def model_for(self, step: str, target: str) -> str:
+        m = self.models.get(step, "inherit")
+        return self.cursor_models.get(m, m) if target == "cursor" else m
+
+    @field_validator("models")
+    @classmethod
+    def _merge_default_models(cls, v: dict[str, str]) -> dict[str, str]:
+        return {**DEFAULT_MODELS, **v}
 
 
 class NotificationsConfig(_Model):
@@ -129,7 +187,10 @@ class NotificationsConfig(_Model):
 
 
 class VizConfig(_Model):
-    pixel_agents: bool = False
+    pixel_agents: bool = False  # watch factory work in a visualiser (historical name: it switches any `tool` on)
+    tool: str = "pixel-agents"  # which visualiser (mobile_factory.viz.BACKENDS)
+    pixel_hooks: bool = True  # let the office see Claude Code sessions live (Pixel Agents' own hook)
+    pixel_labels: bool = True  # always show agent labels in the office
 
 
 class ToolOverride(_Model):
@@ -166,6 +227,7 @@ class FactoryConfig(_Model):
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     vcs: VcsConfig = Field(default_factory=VcsConfig)
     guardrail: GuardrailConfig = Field(default_factory=GuardrailConfig)
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     viz: VizConfig = Field(default_factory=VizConfig)
     setup: SetupConfig = Field(default_factory=SetupConfig)
@@ -179,27 +241,80 @@ class FactoryConfig(_Model):
 
 
 class LoadedConfig:
-    def __init__(self, root: Path, cfg: FactoryConfig, raw: dict[str, Any], missing_env: set[str]) -> None:
+    def __init__(
+        self, root: Path, cfg: FactoryConfig, raw: dict[str, Any], missing_env: set[str], state: Path | None = None
+    ) -> None:
         self.root = root
         self.cfg = cfg
         self.raw = raw
         self.missing_env = missing_env
+        self.state_dir = state or state_dir(root)
 
     @property
     def factory_dir(self) -> Path:
-        return self.root / FACTORY_DIR
+        return self.state_dir
+
+    def path(self, configured: str) -> Path:
+        """A configured file (taste, knowledge, flows, …): relative paths live in the per-developer home."""
+        p = Path(os.path.expanduser(configured))
+        return p if p.is_absolute() else self.state_dir / str(p).removeprefix(f"{FACTORY_DIR}/")
 
     @property
     def runs_dir(self) -> Path:
-        return self.factory_dir / "runs"
+        return self.state_dir / "runs"
+
+
+def state_home() -> Path:
+    return Path(os.path.expanduser(os.environ.get("FACTORY_HOME", "~/.config/mobile-factory")))
+
+
+def _git(root: Path, *args: str) -> str:
+    r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def project_key(root: Path) -> str:
+    """owner__repo from the origin remote, so clones and worktrees share one home; else the main checkout's name+hash."""
+    if m := re.search(r"[:/]([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", _git(root, "remote", "get-url", "origin")):
+        return f"{m.group(1)}__{m.group(2)}"
+    common = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    main = Path(common).parent if common else root.resolve()
+    return f"{main.name}__{hashlib.sha256(str(main).encode()).hexdigest()[:8]}"
+
+
+def state_dir(root: Path) -> Path:
+    """Everything the factory keeps for a repo, outside it: never committed, survives `git clean`, shared by worktrees."""
+    d = state_home() / "projects" / project_key(root)
+    moves = [(root / CONFIG_NAME, d / CONFIG_NAME)] + [(root / FACTORY_DIR / n, d / n) for n in LEGACY_STATE]
+    for old, new in moves:  # one-time move from the old in-repo layout
+        if old.exists() and not new.exists():
+            new.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old), str(new))
+    legacy = root / FACTORY_DIR
+    if legacy.is_dir() and not any(legacy.iterdir()):
+        legacy.rmdir()
+    return d
+
+
+def config_path(root: Path) -> Path:
+    return state_dir(root) / CONFIG_NAME
+
+
+def local_path(root: Path) -> Path:
+    return state_dir(root) / LOCAL_FILE
+
+
+def repo_root(start: Path | None = None) -> Path:
+    cur = (start or Path.cwd()).resolve()
+    top = _git(cur, "rev-parse", "--show-toplevel")
+    return Path(top) if top else cur
 
 
 def find_root(start: Path | None = None) -> Path:
-    cur = (start or Path.cwd()).resolve()
-    for p in (cur, *cur.parents):
-        if (p / CONFIG_NAME).is_file():
-            return p
-    raise ConfigError(f"no {CONFIG_NAME} found from {cur} upwards: run `factory init` in the repo root")
+    root = repo_root(start)
+    if config_path(root).is_file():
+        return root
+    raise ConfigError(f"this repo is not set up yet: run `factory init` in {root}")
 
 
 def secrets_path(value: str = DEFAULT_SECRETS_FILE) -> Path:
@@ -290,15 +405,16 @@ def deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
 
 def load(root: Path | None = None) -> LoadedConfig:
     root = root or find_root()
-    file = root / CONFIG_NAME
-    raw = deep_merge(read_yaml(file), read_yaml(root / LOCAL_NAME))
+    state = state_dir(root)
+    file = state / CONFIG_NAME
+    raw = deep_merge(read_yaml(file), read_yaml(state / LOCAL_FILE))
     missing: set[str] = set()
     resolved = interpolate(raw, environment(raw.get("secrets_file", DEFAULT_SECRETS_FILE)), missing)
     try:
         cfg = FactoryConfig.model_validate(resolved)
     except ValidationError as e:
         raise ConfigError(f"{file}: {e}") from e
-    return LoadedConfig(root, cfg, raw, missing)
+    return LoadedConfig(root, cfg, raw, missing, state)
 
 
 def figma_mode(cfg: FactoryConfig) -> Literal["desktop", "remote", "none"]:

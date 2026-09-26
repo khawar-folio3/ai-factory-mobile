@@ -2,7 +2,8 @@
 
 Output: `factory schema fix`. Do not commit; the runner commits after verification.
 
-- Start from the triage hypothesis and the reproduction. Confirm the root cause in code before editing.
+- Start from the triage hypothesis, the reproduction and, when the HINT line names it, `context/locate.json` (files,
+  call sites, tests mapped while reproduce ran). Confirm the root cause in code before editing.
 - If a LAST FAILURE line is shown, you are on a retry: read the failing log tail it names and fix that, don't start over.
 - Follow the surrounding code: naming, patterns, error handling, comment density. Reuse existing helpers.
 - Add or adjust a unit test when the logic is testable (pure functions, mappers, view-model state). Say so in `tests_added`.

@@ -72,8 +72,13 @@ def test_unknown_keys_fail_fast(tmp_path: Path) -> None:
         config.load(write(tmp_path, "version: 1\nproject: {name: d}\nautonmy: {ceiling: 4}\n"))
 
 
-def test_find_root_walks_up(tmp_path: Path) -> None:
+def test_find_root_is_the_git_top_level_and_config_lives_outside(tmp_path: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     write(tmp_path, "version: 1\nproject: {name: d}\n")
     deep = tmp_path / "a" / "b"
     deep.mkdir(parents=True)
     assert config.find_root(deep) == tmp_path.resolve()
+    assert not (tmp_path / "factory.yaml").exists()  # moved into the factory home on first use
+    assert config.config_path(tmp_path).is_file() and config.state_home() in config.config_path(tmp_path).parents

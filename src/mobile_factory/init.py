@@ -5,11 +5,13 @@ import re
 from importlib import resources
 from pathlib import Path
 
+from . import config
 from .config import CONFIG_NAME
 from .errors import FactoryError
 from .proc import has, run
 
 TEMPLATE_DEFAULTS = {"__VARIANT__": "Debug", "__CEILING__": "1", "__PROJECTS__": "[]"}
+# written into .gitignore by older versions; only `factory uninstall` still looks for them, to clean them up
 GITIGNORE = [".factory/runs/", ".factory/data/", ".factory/events.jsonl", ".factory/evals/work/", ".factory/local.yaml"]
 
 
@@ -18,6 +20,24 @@ def _grep(files: list[Path], pattern: str) -> str:
     for f in files:
         if f.is_file() and (m := rx.search(f.read_text(errors="ignore"))):
             return m.group(1)
+    return ""
+
+
+def _launcher(module: Path) -> str:
+    """Launcher activity from any of the module's manifests (src/main first; custom source sets too)."""
+    main = module / "src/main/AndroidManifest.xml"
+    manifests = [main, *sorted(m for m in module.glob("src/**/AndroidManifest.xml") if m != main)]
+    for manifest in (m for m in manifests if m.is_file()):
+        xml = re.sub(r"<!--.*?-->", "", manifest.read_text(errors="ignore"), flags=re.S)
+        for block in re.findall(r"<activity\b(?:[^>]*/>|.*?</activity>)", xml, re.S):
+            if "android.intent.category.LAUNCHER" in block and (m := re.search(r'android:name="([^"]+)"', block)):
+                name = m.group(1)
+                if name.startswith("."):
+                    pkg = _grep([manifest], r'package="([\w.]+)"') or _grep(
+                        [module / "build.gradle.kts", module / "build.gradle"], r"""namespace\s*=?\s*["']([\w.]+)["']"""
+                    )
+                    name = pkg + name
+                return name
     return ""
 
 
@@ -36,14 +56,7 @@ def detect(root: Path) -> dict[str, str]:
     app_id = _grep(
         [root / app / "build.gradle.kts", root / app / "build.gradle"], r"""applicationId\s*=?\s*["']([\w.]+)["']"""
     )
-    manifest = root / app / "src/main/AndroidManifest.xml"
-    launcher = ""
-    if manifest.is_file():
-        xml = manifest.read_text(errors="ignore")
-        for block in re.findall(r"<activity\b(?:[^>]*/>|.*?</activity>)", xml, re.S):
-            if "android.intent.category.LAUNCHER" in block and (m := re.search(r'android:name="([^"]+)"', block)):
-                launcher = m.group(1)
-                break
+    launcher = _launcher(root / app)
     kind, site = "file", ""
     if has("twg"):
         kind = "jira"
@@ -68,7 +81,9 @@ def detect(root: Path) -> dict[str, str]:
 
 
 def init(root: Path, force: bool = False, answers: dict[str, str] | None = None) -> list[str]:
-    cfg = root / CONFIG_NAME
+    """Writes the repo's factory config into the per-developer home: the repo itself is never touched."""
+    home = config.state_dir(root)
+    cfg = home / CONFIG_NAME
     if cfg.exists() and not force:
         raise FactoryError(f"{cfg} exists (use --force to overwrite)")
     text = resources.files("mobile_factory.templates").joinpath("factory.yaml").read_text()
@@ -76,17 +91,11 @@ def init(root: Path, force: bool = False, answers: dict[str, str] | None = None)
     values = {**TEMPLATE_DEFAULTS, **detected, **(answers or {})}
     for k, v in values.items():
         text = text.replace(k, v)
+    cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(text)
     for d in ("knowledge", "flows", "tickets"):
-        (root / ".factory" / d).mkdir(parents=True, exist_ok=True)
-    example = root / ".factory" / "knowledge" / "README.md"
+        (home / d).mkdir(parents=True, exist_ok=True)
+    example = home / "knowledge" / "README.md"
     if not example.exists():
         example.write_text(resources.files("mobile_factory.templates").joinpath("knowledge-example.md").read_text())
-    gi = root / ".gitignore"
-    current = gi.read_text() if gi.is_file() else ""
-    add = [ln for ln in GITIGNORE if ln not in current]
-    if add:
-        gi.write_text(
-            current.rstrip() + ("\n\n" if current.strip() else "") + "# mobile-factory\n" + "\n".join(add) + "\n"
-        )
     return [f"{k.strip('_').lower()}: {values[k] or '(not detected, fill in)'}" for k in detected]

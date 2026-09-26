@@ -30,6 +30,7 @@ def to_fix(eng: Engine, fake: FakePlatform) -> None:
     assert eng.st.node == "triage" and eng.st.status == "waiting_agent"
     eng.submit("triage", TRIAGE)
     assert eng.st.node == "reproduce", eng.instructions()
+    assert "ALONGSIDE start `factory-locate` (sonnet) in the SAME message" in eng.instructions()
     fake.snapshot(eng.dir / "snapshots", "before", "profile")
     eng.submit("reproduce", REPRO)
 
@@ -137,6 +138,11 @@ def test_detector_findings_must_be_answered_and_review_loops(repo: Path, fake: F
     verify(eng, fake)
     detector = eng.out("_review_ctx")["detector"]
     assert [d["rule"] for d in detector] == ["S004"]
+    text = eng.instructions()
+    assert "PARALLEL start ALL of these in one message" in text
+    for part in ("review-correctness (opus)", "review-taste (sonnet)", "review-detectors (haiku)"):
+        assert f"factory-{part}" in text
+    assert "delegate to the `factory-review` subagent (opus)" in text
     with pytest.raises(FactoryError, match="detector findings without an outcome"):
         eng.submit("review", {"findings": []})
 
@@ -191,3 +197,27 @@ def test_state_survives_reload(repo: Path, fake: FakePlatform) -> None:
     again = Engine.load(lc)
     assert again.st.node == "reproduce" and again.st.risk is not None
     assert [e for e in again.st.history][:2] == ["intake", "triage"]
+
+
+def test_factory_owned_files_never_block_or_enter_the_fix(repo: Path, fake: FakePlatform) -> None:
+    from mobile_factory import adapters
+
+    lc = load(repo)
+    adapters.install(lc, "claude")  # untracked skills, .mcp.json, CLAUDE.md
+    (repo / ".cursor/rules").mkdir(parents=True)
+    (repo / ".cursor/rules/factory-fix.mdc").write_text("x")
+    eng = Engine.start(lc, "APP-1")
+    to_fix(eng, fake)  # preflight passed despite the untracked factory files
+    edit(repo)
+    eng.submit("fix", FIX)
+    verify(eng, fake)
+    assert eng.out("commit")["files"] == ["app/src/main/java/Profile.kt"]
+
+
+def test_fix_gets_locate_hint_when_present(repo: Path, fake: FakePlatform) -> None:
+    eng = Engine.start(load(repo), "APP-1")
+    to_fix(eng, fake)
+    assert "HINT" not in eng.instructions()
+    (eng.dir / "context").mkdir(exist_ok=True)
+    (eng.dir / "context/locate.json").write_text('{"files": []}')
+    assert "HINT     " in eng.instructions() and "locate.json" in eng.instructions()

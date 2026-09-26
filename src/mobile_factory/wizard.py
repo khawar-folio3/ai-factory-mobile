@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -11,7 +13,7 @@ import yaml
 
 from . import config
 from . import setup as machine
-from .config import CONFIG_NAME, LOCAL_NAME, TrackerConfig
+from .config import TrackerConfig
 from .errors import FactoryError
 from .init import detect
 from .init import init as write_repo_config
@@ -61,6 +63,25 @@ class Checks:
         trunks = [b for b in ("develop", "main", "master") if b in refs]
         return list(dict.fromkeys([*default, *releases, *trunks]))
 
+    def jira_keys(self, root: Path) -> list[str]:
+        """Most-used Jira keys in recent commit subjects and branch names, e.g. ['SCPB', 'CA']."""
+        log = run(["git", "log", "-300", "--format=%s"], root).out
+        branches = run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"], root).out
+        found = Counter(re.findall(r"\b([A-Z][A-Z0-9]{1,9})-\d+", log + branches))
+        return [k for k, _ in found.most_common(3)]
+
+    def variants(self, root: Path, module: str) -> dict[str, str]:
+        """{variant: application id} for every installable variant, debug first; {} when Gradle can't answer."""
+        if not (root / "gradlew").is_file():
+            return {}
+        with resources.as_file(resources.files("mobile_factory.templates") / "variants.gradle") as script:
+            out = _gradle_out(root, "-I", str(script), f":{module}:factoryVariants")
+        found = {n[:1].upper() + n[1:]: i for n, i in re.findall(r"^factory-variant (\w+) (\S+)$", out, re.M)}
+        if not found:  # AGP < 7 has no androidComponents: names only
+            out = _gradle_out(root, f":{module}:tasks", "--group", "install")
+            found = dict.fromkeys(re.findall(r"^install(\w+) - Installs the \w+ build", out, re.M), "")
+        return dict(sorted(found.items(), key=lambda kv: not kv[0].endswith("Debug")))
+
     def has_flavors(self, root: Path) -> bool:
         files = [*root.glob("*.gradle*"), *root.glob("*/build.gradle*")]
         return any(
@@ -76,24 +97,37 @@ class Result:
     todo: list[str] = field(default_factory=list)
 
 
+def _gradle_out(root: Path, *args: str) -> str:
+    try:
+        r = run([str(root / "gradlew"), "-q", *args], root, timeout=600)
+    except FactoryError:
+        return ""
+    return r.out if r.ok else ""
+
+
+def _index(options: list[str], value: object) -> int:
+    return options.index(value) if isinstance(value, str) and value in options else 0
+
+
+def normalize_variant(value: str) -> str:
+    """Android Studio shows 'superapp Stage Acme Debug (default)'; Gradle wants 'SuperappStageAcmeDebug'."""
+    v = re.sub(r"\s+", "", re.sub(r"\(.*?\)", "", value))
+    return v[:1].upper() + v[1:]
+
+
 def _env_name(prefix: str, scope: str) -> str:
     return f"{prefix}__{re.sub(r'[^A-Z0-9]+', '_', scope.upper()).strip('_')}"
 
 
-def _write_local(root: Path, data: dict[str, Any]) -> None:
-    f = root / LOCAL_NAME
+def write_local(root: Path, data: dict[str, Any]) -> Path:
+    f = config.local_path(root)
     f.parent.mkdir(parents=True, exist_ok=True)
     merged = config.deep_merge(config.read_yaml(f), data)
     f.write_text(
-        "# Per-developer factory settings (git-ignored). Written by `factory init`.\n"
+        f"# Your factory settings for {root.name} (outside the repo). Written by `factory init`.\n"
         + yaml.safe_dump(merged, sort_keys=False)
     )
-    if not run(["git", "check-ignore", "-q", LOCAL_NAME], root).ok:  # repo predates local.yaml: ignore it locally
-        exclude = Path(run(["git", "rev-parse", "--git-path", "info/exclude"], root).out.strip())
-        exclude = exclude if exclude.is_absolute() else root / exclude
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        with exclude.open("a") as fh:
-            fh.write(f"/{LOCAL_NAME}\n")
+    return f
 
 
 def store_secret(name: str, value: str, secrets_file: str = config.DEFAULT_SECRETS_FILE) -> Path:
@@ -114,47 +148,71 @@ class Wizard:
         self.p = p
         self.c = checks or Checks()
         self.result = Result()
+        self.saved: dict[str, Any] = {}
 
     # ---------- repo (once, by the first person) ----------
 
-    def repo(self) -> None:
+    def repo(self, cur: config.FactoryConfig | None = None) -> None:
+        """Project questions; with `cur` (already set up) every question starts from the saved value."""
         p = self.p
-        p.say("\n== Project settings (shared, committed in factory.yaml)")
+        p.say("\n== Project settings")
         branches = self.c.remote_branches(self.root)
+        saved_base = cur.project.base_branch if cur else ""
+        if saved_base and saved_base != "ask" and saved_base not in branches:
+            branches = [saved_base, *branches]
         options = [*branches, "ask on every run", "other (type it)"]
-        pick = options[p.choose("Base branch PRs target", options, 0)]
+        base_default = options.index("ask on every run") if saved_base == "ask" else _index(options, saved_base)
+        pick = options[p.choose("Base branch PRs target", options, base_default)]
         if pick == "other (type it)":
             pick = p.ask("Base branch", branches[0] if branches else "main")
         answers = {"__BASE__": "ask" if pick == "ask on every run" else pick}
 
         detected = detect(self.root)
-        answers["__APP_MODULE__"] = p.ask("App module (the one that builds the APK)", detected["__APP_MODULE__"])
-        if self.c.has_flavors(self.root):
+        answers["__APP_MODULE__"] = p.ask(
+            "App module (the one that builds the APK)", cur.android.app_module if cur else detected["__APP_MODULE__"]
+        )
+        p.say("  reading build variants from Gradle…")
+        found = self.c.variants(self.root, answers["__APP_MODULE__"])
+        variant = ""
+        if found:
+            names = list(found)
+            i = p.choose(
+                "Variant to build and install", [*names, "other (type it)"], _index(names, cur and cur.android.variant)
+            )
+            variant = names[i] if i < len(names) else ""
+        if not variant and self.c.has_flavors(self.root):
             p.say("  this app has product flavors: the variant is <flavors><BuildType>, e.g. stageAcmeDebug")
             p.say("  (Android Studio → Build Variants panel shows the exact name)")
-            variant = ""
             while not variant:
-                variant = p.ask("Debug variant to build and install")
-        else:
-            variant = p.ask("Debug variant to build and install", "Debug")
-        answers["__VARIANT__"] = variant[:1].upper() + variant[1:]
+                variant = p.ask("Variant to build and install")
+        elif not variant:
+            variant = p.ask("Variant to build and install", "Debug")
+        answers["__VARIANT__"] = normalize_variant(variant)
         answers["__APP_ID__"] = p.ask(
-            "Application id of that build on the device (e.g. com.acme.app.debug)", detected["__APP_ID__"]
+            "Application id of that build on the device (e.g. com.acme.app.debug)",
+            found.get(answers["__VARIANT__"]) or (cur and cur.android.application_id) or detected["__APP_ID__"],
         )
         answers["__LAUNCHER__"] = p.ask(
-            "Launcher activity, fully qualified (empty = the app's default launcher)", detected["__LAUNCHER__"]
+            "Launcher activity, fully qualified (empty = the app's default launcher)",
+            (cur and cur.android.launch_activity) or detected["__LAUNCHER__"],
         )
 
-        kind = p.choose("Where do tickets live?", ["Jira", "Markdown files in .factory/tickets (no Jira)"], 0)
+        tickets = ["Jira", "Markdown ticket files in the factory home (no Jira)"]
+        kind = p.choose("Where do tickets live?", tickets, 1 if cur and cur.tracker.kind == "file" else 0)
         if kind == 0:
             site = ""
             while not site:
-                site = normalize_site(p.ask("Jira site URL (e.g. https://acme.atlassian.net)"))
-            keys = [
-                k.strip().upper()
-                for k in p.ask("Jira project keys, comma separated (empty = any)").split(",")
-                if k.strip()
-            ]
+                site = normalize_site(
+                    p.ask(
+                        "Jira site URL (e.g. https://acme.atlassian.net)",
+                        (cur and cur.tracker.site) or detected["__JIRA_SITE__"],
+                    )
+                )
+            keys_default = (
+                (", ".join(cur.tracker.projects) or "any") if cur else ", ".join(self.c.jira_keys(self.root)) or "any"
+            )
+            raw = p.ask("Jira project keys, comma separated (any = every project)", keys_default)
+            keys = [] if raw.strip().lower() == "any" else [k.strip().upper() for k in raw.split(",") if k.strip()]
             answers |= {"__TRACKER_KIND__": "jira", "__JIRA_SITE__": site, "__PROJECTS__": json.dumps(keys)}
         else:
             answers |= {"__TRACKER_KIND__": "file", "__JIRA_SITE__": ""}
@@ -165,26 +223,37 @@ class Wizard:
             "3 trusted: only the PR asks",
             "4 autonomous",
         ]
-        answers["__CEILING__"] = str(p.choose("Autonomy ceiling for this repo", levels, 1))
-        for line in write_repo_config(self.root, force=(self.root / CONFIG_NAME).exists(), answers=answers):
+        answers["__CEILING__"] = str(
+            p.choose("Autonomy ceiling for this repo", levels, cur.autonomy.ceiling if cur else 1)
+        )
+        for line in write_repo_config(self.root, force=config.config_path(self.root).exists(), answers=answers):
             p.say(f"  {line}")
         self.result.repo_written = True
 
     # ---------- developer (every person, every machine) ----------
 
-    def jira(self, lc: config.LoadedConfig) -> None:
+    def jira(self, lc: config.LoadedConfig, check: bool = False) -> None:
         t = lc.cfg.tracker
         if t.kind != "jira":
             return
         p = self.p
         p.say(f"\n== Jira ({t.site})")
+        saved = (self.saved.get("tracker") or {}).get("provider")
+        if check and saved:
+            try:
+                who = self.c.twg_whoami(t.site) if saved == "twg" else self.c.jira_rest(t.site, t.email, t.token)
+                p.say(f"  ok  {who}")
+                return
+            except FactoryError as e:
+                p.say(f"  warning: your saved Jira sign-in stopped working: {str(e)[:120]}")
+        default = {"twg": 0, "rest": 1}.get(saved or "", 0 if self.c.has("twg") else 1)
         choice = p.choose(
             "How do you sign in to Jira?",
             [
                 "twg CLI (your Atlassian login, recommended)",
                 "Jira API token (id.atlassian.com → Security → API tokens)",
             ],
-            0 if self.c.has("twg") else 1,
+            default,
         )
         if choice == 0:
             self._twg(t.site)
@@ -222,7 +291,7 @@ class Wizard:
             _env_name("JIRA_API_TOKEN", site_prefix(site)),
         )
         for _ in range(MAX_TRIES):
-            email = p.ask("Atlassian account email")
+            email = p.ask("Atlassian account email", run(["git", "config", "user.email"], self.root).out.strip())
             token = p.secret("Jira API token (hidden)")
             try:
                 who = self.c.jira_rest(site, email, token)
@@ -240,8 +309,9 @@ class Wizard:
             return
         self.result.todo.append("Jira API token not verified: re-run `factory init`")
 
-    def github(self, lc: config.LoadedConfig) -> None:
+    def github(self, lc: config.LoadedConfig, check: bool = False) -> None:
         p = self.p
+        saved = (self.saved.get("vcs") or {}).get("github_account", "")
         try:
             repo = run(["git", "remote", "get-url", lc.cfg.vcs.remote], self.root).out.strip()
         except FactoryError:
@@ -258,7 +328,12 @@ class Wizard:
             self.result.todo.append("gh auth login --web, then `factory init` again")
             return
         pushable = [a for a in accounts if slug and self.c.gh_can_push(slug, a)]
-        default = accounts.index(pushable[0]) if pushable else 0
+        if check and saved in accounts and (not slug or saved in pushable):
+            p.say(f"  ok  PRs as {saved}")
+            return
+        if check and saved:
+            p.say(f"  warning: {saved} is {'not logged in' if saved not in accounts else 'unable to push'} here")
+        default = accounts.index(saved) if saved in accounts else accounts.index(pushable[0]) if pushable else 0
         labels = [f"{a}{'  (can push)' if a in pushable else ''}" for a in accounts]
         account = accounts[p.choose("Which GitHub account opens PRs for this repo?", labels, default)]
         if slug and account not in pushable:
@@ -267,9 +342,35 @@ class Wizard:
         self.result.local = config.deep_merge(self.result.local, {"vcs": {"github_account": account}})
         p.say(f"  ok  PRs as {account}")
 
-    def slack(self, lc: config.LoadedConfig) -> None:
+    def agent(self, check: bool = False) -> None:
         p = self.p
-        if not p.confirm("\nPost gate/finish notifications to Slack?", default=False):
+        p.say("\n== Coding agent")
+        claude, cursor = self.c.has("claude"), self.c.has("agent") or self.c.has("cursor-agent")
+        saved = (self.saved.get("agents") or {}).get("use") or []
+        if check and saved:
+            p.say(f"  ok  agent: {' + '.join(saved)}  (Machine tools checks its CLI and login)")
+            return
+        p.say("  runs the agent steps (triage, fix, review, taste distill); Machine tools installs and logs in its CLI")
+        options = [
+            f"Claude Code{'  (installed)' if claude else ''}",
+            f"Cursor{'  (installed)' if cursor else ''}",
+            "Both",
+        ]
+        choices = [["claude"], ["cursor"], ["claude", "cursor"]]
+        default = choices.index(saved) if saved in choices else 2 if claude and cursor else 1 if cursor else 0
+        use = choices[p.choose("Which coding agent do you use?", options, default)]
+        self.result.local = config.deep_merge(self.result.local, {"agents": {"use": use}})
+        p.say(f"  ok  agent: {' + '.join(use)}")
+
+    def slack(self, lc: config.LoadedConfig, check: bool = False) -> None:
+        p = self.p
+        on = bool((self.saved.get("notifications") or {}).get("slack_webhook"))
+        if check:
+            p.say(f"\n  ok  Slack notifications {'on' if on else 'off'}")
+            return
+        if not p.confirm("\nPost gate/finish notifications to Slack?", default=on):
+            if on:
+                self.result.local = config.deep_merge(self.result.local, {"notifications": {"slack_webhook": ""}})
             return
         var = _env_name("SLACK_WEBHOOK_URL", lc.cfg.project.name)
         url = p.secret("Slack incoming webhook URL (hidden)")
@@ -280,7 +381,7 @@ class Wizard:
         self.result.secrets.append(var)
         self.result.local = config.deep_merge(self.result.local, {"notifications": {"slack_webhook": f"${{{var}}}"}})
 
-    def figma(self, lc: config.LoadedConfig) -> None:
+    def figma(self, lc: config.LoadedConfig, check: bool = False) -> None:
         p = self.p
         mode = config.figma_mode(lc.cfg)
         if mode == "none":
@@ -301,22 +402,102 @@ class Wizard:
 
     # ---------- flow ----------
 
-    def run(self, reconfigure: bool = False) -> Result:
-        p = self.p
-        existing = (self.root / CONFIG_NAME).exists()
-        p.say(f"Mobile Factory setup for {self.root.name}")
-        if existing and not reconfigure:
-            p.say("factory.yaml found: this repo is set up; configuring you on this machine.")
+    def _summary(self, lc: config.LoadedConfig) -> str:
+        """Every saved setting, in full, one aligned row each (`  · Key  value`: the terminal styles the key)."""
+        return "\n== Already set up\n" + "\n".join(f"  · {k}  {v}" for k, v in self._rows(lc))
+
+    def _rows(self, lc: config.LoadedConfig) -> list[tuple[str, str]]:
+        c = lc.cfg
+        levels = ["manual", "assisted", "supervised", "trusted", "autonomous"]
+        signin = {"twg": "twg (your Atlassian login)", "rest": "Jira API token"}.get(
+            c.tracker.provider, c.tracker.provider
+        )
+        agents = {"claude": "Claude Code", "cursor": "Cursor"}
+        taste = lc.path(c.guardrail.taste)
+        rules = sum(1 for ln in taste.read_text().splitlines() if ln.startswith("### R")) if taste.is_file() else 0
+        rows = [
+            ("Base branch", c.project.base_branch),
+            ("App module", c.android.app_module),
+            ("Variant", c.android.variant),
+            ("App id", c.android.application_id or "not set"),
+            ("Launcher", c.android.launch_activity or "the app's default launcher"),
+        ]
+        if c.tracker.kind == "jira":
+            rows += [
+                ("Jira", c.tracker.site),
+                ("Projects", ", ".join(c.tracker.projects) or "any"),
+                ("Sign-in", signin),
+            ]
         else:
-            self.repo()
+            rows.append(("Tickets", f"files in {lc.path('tickets')}"))
+        rows += [
+            ("Autonomy", f"{c.autonomy.ceiling} · {levels[c.autonomy.ceiling]}"),
+            ("GitHub", c.vcs.github_account or "gh's active account"),
+            ("Agent", " + ".join(agents.get(a, a) for a in c.agents.use)),
+            ("Taste rules", f"{rules} rules" if rules else "none yet"),
+            ("Slack", "on" if c.notifications.slack_webhook else "off"),
+            (
+                "Pixel office",
+                ("on · live hooks " + ("on" if c.viz.pixel_hooks else "off")) if c.viz.pixel_agents else "off",
+            ),
+            ("Stored in", str(lc.state_dir).replace(str(Path.home()), "~")),
+        ]
+        return rows
+
+    def run(self, reconfigure: bool = False) -> Result:
+        """First time: every question. Already set up: check the saved settings, change some, or start over."""
+        p = self.p
+        existing = config.config_path(self.root).exists()
+        self.saved = config.read_yaml(config.local_path(self.root))
+        p.say(f"Mobile Factory setup for {self.root.name}")
+        sections = ["Project", "Jira", "GitHub", "Coding agent", "Slack", "Figma"]
+        change: set[str] = set(sections)  # sections to ask; the rest are only checked
+        pick_each = False  # "Change some settings": ask per section, right before it
+        if existing and self.saved and not reconfigure:
+            p.say(self._summary(config.load(self.root)))
+            pick = p.choose(
+                "What do you want to do?",
+                ["Check everything and keep my settings", "Change some settings", "Start over"],
+                0,
+            )
+            change = set(sections) if pick == 2 else set()
+            pick_each = pick == 1
+        elif existing and not reconfigure:
+            change.discard("Project")  # set up, but not by you on this machine yet: your part only
+
+        def ask(section: str, label: str, keys: tuple[str, ...]) -> bool:
+            """Per section: its current settings, one row each, then "Change …?" right before the section."""
+            if not pick_each:
+                return section in change
+            p.say("\n" + "\n".join(f"  · {k}  {v}" for k, v in self._rows(config.load(self.root)) if k in keys))
+            return p.confirm(f"Change {label}?", False)
+
+        lc = config.load(self.root) if existing else None
+        project = (
+            "Base branch",
+            "App module",
+            "Variant",
+            "App id",
+            "Launcher",
+            "Jira",
+            "Projects",
+            "Tickets",
+            "Autonomy",
+        )
+        if (lc and ask("Project", "project settings", project)) or (not lc and "Project" in change):
+            self.repo(lc.cfg if lc else None)
         lc = config.load(self.root)
-        self.jira(lc)
-        self.github(lc)
-        self.slack(lc)
-        self.figma(lc)
+        c = lc.cfg
+        jira_on = c.tracker.kind == "jira"
+        self.jira(lc, check=not (jira_on and ask("Jira", "Jira sign-in", ("Sign-in",))))
+        self.github(lc, check=not ask("GitHub", "GitHub account", ("GitHub",)))
+        self.agent(check=not ask("Coding agent", "coding agent", ("Agent",)))
+        self.slack(lc, check=not ask("Slack", "Slack notifications", ("Slack",)))
+        figma = config.figma_mode(c)
+        self.figma(lc, check=not (figma != "none" and ask("Figma", "Figma", ())))
         if self.result.local:
-            _write_local(self.root, self.result.local)
-            p.say(f"\nsaved your settings to {LOCAL_NAME} (git-ignored)")
+            where = str(write_local(self.root, self.result.local)).replace(str(Path.home()), "~")
+            p.say(f"\n  ok  settings saved  ({where}: outside the repo, never committed)")
         if self.result.secrets:
             p.say(f"saved secrets {', '.join(self.result.secrets)} to {config.secrets_path(lc.cfg.secrets_file)}")
         return self.result

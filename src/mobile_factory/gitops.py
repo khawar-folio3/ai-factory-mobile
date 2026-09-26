@@ -7,6 +7,22 @@ from .errors import FactoryError
 from .globs import matches
 from .proc import out, run
 
+# Files the factory itself writes into a repo: never part of a fix, never "dirty".
+FACTORY_OWNED = [
+    "factory.yaml",
+    ".factory/**",
+    ".claude/skills/factory/**",
+    ".claude/skills/factory-*/**",
+    ".claude/agents/factory-*.md",
+    ".claude/settings.local.json",
+    ".cursor/rules/factory*.mdc",
+    ".cursor/agents/factory-*.md",
+    ".cursor/mcp.json",
+    ".mcp.json",
+    "CLAUDE.md",
+    "AGENTS.md",
+]
+
 
 class Git:
     def __init__(self, root: Path, local_only: list[str] | None = None) -> None:
@@ -27,10 +43,10 @@ class Git:
         return re.sub(r"\.git$", "", re.sub(r"^(git@|ssh://git@|https://)[^/:]+[:/]", "", url))
 
     def _keep(self, path: str) -> bool:
-        return bool(path) and not path.startswith(".factory/") and not matches(path, self.local_only)
+        return bool(path) and not matches(path, FACTORY_OWNED) and not matches(path, self.local_only)
 
     def dirty(self) -> list[str]:
-        lines = self("status", "--porcelain", check=False).splitlines()
+        lines = self("status", "--porcelain", "--untracked-files=all", check=False).splitlines()
         return [ln[3:] for ln in lines if self._keep(ln[3:].split(" -> ")[-1])]
 
     def fetch(self, remote: str, branch: str) -> None:

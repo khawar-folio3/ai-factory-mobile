@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
 
-from .config import LoadedConfig
+from .config import LoadedConfig, state_home
+from .proc import has, run
 
 Target = Literal["claude", "cursor"]
 BLOCK_START = "<!-- mobile-factory:start -->"
@@ -84,6 +86,28 @@ def upsert_block(path: Path, body: str) -> None:
     path.write_text(text)
 
 
+SUBAGENT_FOOTER = """
+
+## Running as a subagent
+
+You are one step of a Mobile Factory run, started by the session that drives `factory next`.
+Write your JSON output to the file named in your prompt and reply with that path only.
+Never run `factory submit`, `factory approve` / `reject`, `git commit` / `push`, or edit the run's state.json.
+"""
+READ_ONLY = (
+    "\nRead-only: never edit, create or delete source files; write only your output file."
+    " Other agents run at the same time.\n"
+)
+READ_ONLY_PARTS = ("review-correctness", "review-taste", "review-detectors", "locate", "learn-tally")
+
+
+def subagent_text(name: str, model: str) -> str:
+    desc, body = _split(skill_text(name))
+    extra = READ_ONLY if name in READ_ONLY_PARTS else ""
+    head = f"---\nname: factory-{name}\ndescription: Mobile Factory {name} step. {desc}\nmodel: {model}\n---\n\n"
+    return head + body.rstrip() + "\n" + extra + SUBAGENT_FOOTER
+
+
 AGENTS_BLOCK = """## Mobile Factory
 
 This repo runs bug fixes through Mobile Factory (`factory` CLI). When asked to fix a ticket:
@@ -95,31 +119,69 @@ This repo runs bug fixes through Mobile Factory (`factory` CLI). When asked to f
 """
 
 
+def _subagents(lc: LoadedConfig, target: Target, folder: Path) -> list[Path]:
+    """One subagent per step that has a model tier; Cursor reads .cursor/agents first, so its ids never clash."""
+    folder.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name in lc.cfg.agents.models:
+        if name in skill_names():
+            p = folder / f"factory-{name}.md"
+            p.write_text(subagent_text(name, lc.cfg.agents.model_for(name, target)))
+            out.append(p)
+    return out
+
+
+def agent_home() -> Path:
+    """Where agent integrations are installed: the user's home, never the repo."""
+    return Path(os.environ.get("FACTORY_AGENT_HOME") or Path.home())
+
+
+def _allow_state_home() -> Path:
+    """Runs and harvest data live in the factory home: let Claude Code read and write there without prompting."""
+    p = agent_home() / ".claude" / "settings.json"
+    current = json.loads(p.read_text()) if p.is_file() else {}
+    dirs = current.setdefault("permissions", {}).setdefault("additionalDirectories", [])
+    if str(state_home()) not in dirs:
+        dirs.append(str(state_home()))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(current, indent=2) + "\n")
+    return p
+
+
+def _register_claude_mcp(root: Path, servers: dict[str, Any]) -> list[str]:
+    """Local scope: Claude Code keeps these in ~/.claude.json under this repo's path, not in the repo."""
+    done = []
+    for name, spec in servers.items():
+        if run(["claude", "mcp", "add-json", "--scope", "local", name, json.dumps(spec)], root).ok:
+            done.append(name)
+    return done
+
+
 def install(lc: LoadedConfig, target: Target) -> list[Path]:
-    root = lc.root
+    """Skills and subagents go to the user's home (~/.claude, ~/.cursor): nothing is written into the repo."""
+    home = agent_home()
     written: list[Path] = []
     if target == "claude":
-        for name in skill_names():
-            p = root / ".claude" / "skills" / ("factory" if name == "factory" else f"factory-{name}") / "SKILL.md"
+        for name in skill_names():  # Cursor also loads ~/.claude/skills, so one copy serves both
+            p = home / ".claude" / "skills" / ("factory" if name == "factory" else f"factory-{name}") / "SKILL.md"
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(_front_matter(name, skill_text(name)))
             written.append(p)
-        mcp = root / ".mcp.json"
-        _merge_json(mcp, mcp_json(lc, "claude"))
-        written.append(mcp)
-        upsert_block(root / "CLAUDE.md", AGENTS_BLOCK)
-        written.append(root / "CLAUDE.md")
+        written += _subagents(lc, "claude", home / ".claude" / "agents")
+        written.append(_allow_state_home())
+        if servers := mcp_json(lc, "claude")["mcpServers"]:
+            if has("claude"):
+                _register_claude_mcp(lc.root, servers)
+            written.append(home / ".claude.json")
     else:
-        rules = root / ".cursor" / "rules"
-        rules.mkdir(parents=True, exist_ok=True)
         for name in skill_names():
-            p = rules / ("factory.mdc" if name == "factory" else f"factory-{name}.mdc")
-            desc, body = _split(skill_text(name))
-            p.write_text(f"---\ndescription: Mobile Factory · {desc}\nalwaysApply: false\n---\n\n{body}")
+            p = home / ".cursor" / "skills" / ("factory" if name == "factory" else f"factory-{name}") / "SKILL.md"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_front_matter(name, skill_text(name)))
             written.append(p)
-        mcp = root / ".cursor" / "mcp.json"
-        _merge_json(mcp, mcp_json(lc, "cursor"))
-        written.append(mcp)
-        upsert_block(root / "AGENTS.md", AGENTS_BLOCK)
-        written.append(root / "AGENTS.md")
+        written += _subagents(lc, "cursor", home / ".cursor" / "agents")
+        if mcp_json(lc, "cursor")["mcpServers"]:
+            mcp = home / ".cursor" / "mcp.json"
+            _merge_json(mcp, mcp_json(lc, "cursor"))
+            written.append(mcp)
     return written

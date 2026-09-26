@@ -7,12 +7,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
-from .adapters import BLOCK_END, BLOCK_START
+from .adapters import BLOCK_END, BLOCK_START, agent_home
 from .errors import ConfigError
 from .init import GITIGNORE
 from .proc import run
 from .state import RunStore
 
+# Old versions installed these into the repo; `factory install` and `factory uninstall` clean them up.
+LEGACY_REPO_FILES = (
+    "factory.yaml",
+    ".factory",
+    ".claude/skills/factory",
+    ".claude/agents/factory-review.md",
+    ".cursor/rules/factory.mdc",
+)
 EXCLUDE_LINES = {
     "/factory.yaml",
     "/.factory/",
@@ -21,6 +29,7 @@ EXCLUDE_LINES = {
     "/.cursor/",
     "/.claude/skills/factory/",
     "/.claude/skills/factory-*/",
+    "/.claude/agents/factory-*.md",
     "/CLAUDE.md",
     "/AGENTS.md",
 }
@@ -34,11 +43,15 @@ class Removal:
     tracked: list[str] = field(default_factory=list)  # deletions git will show
 
     def render(self, root: Path) -> str:
-        lines = [f"delete  {p.relative_to(root)}{'/' if p.is_dir() else ''}" for p in self.delete]
+        def show(p: Path) -> str:
+            name = str(p.relative_to(root)) if p.is_relative_to(root) else str(p).replace(str(Path.home()), "~")
+            return name + ("/" if p.is_dir() else "")
+
+        lines = [f"delete  {show(p)}" for p in self.delete]
         lines += [f"edit    {e}" for e in self.edit]
         if self.tracked:
             lines.append(f"note    committed files will show as deleted in git: {', '.join(self.tracked)}")
-        return "\n".join(lines) or "nothing to remove: no factory files in this repo"
+        return "\n".join(lines) or "nothing to remove: no factory files for this repo"
 
 
 def _mcp_names(root: Path) -> set[str]:
@@ -63,13 +76,26 @@ def _exclude_file(root: Path) -> Path | None:
     return p if p.is_absolute() else root / p
 
 
-def plan(root: Path) -> Removal:
+def plan(root: Path, home: bool = True, global_: bool = False) -> Removal:
+    """Old in-repo files always; this repo's factory home unless `home=False`; user-level skills only with `global_`."""
     rm = Removal()
+    if home and (d := config.state_dir(root)).exists():
+        rm.open_runs = [r.id for r in RunStore(d / "runs").all() if not r.finished]
+        rm.delete.append(d)
+    if global_:
+        h = agent_home()
+        for folder in (h / ".claude/skills", h / ".cursor/skills"):
+            rm.delete += sorted(folder.glob("factory")) + sorted(folder.glob("factory-*"))
+        for folder in (h / ".claude/agents", h / ".cursor/agents"):
+            rm.delete += sorted(folder.glob("factory-*.md"))
     for rel in (config.CONFIG_NAME, ".factory", ".claude/skills/factory"):
         if (root / rel).exists():
             rm.delete.append(root / rel)
-    rm.delete += sorted((root / ".claude/skills").glob("factory-*")) + sorted(
-        (root / ".cursor/rules").glob("factory*.mdc")
+    rm.delete += (
+        sorted((root / ".claude/skills").glob("factory-*"))
+        + sorted((root / ".claude/agents").glob("factory-*.md"))
+        + sorted((root / ".cursor/rules").glob("factory*.mdc"))
+        + sorted((root / ".cursor/agents").glob("factory-*.md"))
     )
 
     names = _mcp_names(root)
@@ -90,9 +116,9 @@ def plan(root: Path) -> Removal:
     if ex and ex.is_file() and EXCLUDE_LINES & set(ex.read_text().splitlines()):
         rm.edit.append(".git/info/exclude: remove the mobile-factory lines")
 
-    rm.open_runs = [r.id for r in RunStore(root / ".factory" / "runs").all() if not r.finished]
-    if rm.delete:  # `git ls-files` without paths would list the whole repo
-        r = run(["git", "ls-files", "--", *(str(p.relative_to(root)) for p in rm.delete)], root)
+    inside = [str(p.relative_to(root)) for p in rm.delete if p.is_relative_to(root)]
+    if inside:  # `git ls-files` without paths would list the whole repo
+        r = run(["git", "ls-files", "--", *inside], root)
         top = {ln.split("/")[0] if ln.startswith(".factory/") else ln for ln in r.out.split()} if r.ok else set()
         rm.tracked = sorted(top)
     return rm
@@ -134,6 +160,13 @@ def apply(root: Path, rm: Removal) -> None:
             shutil.rmtree(p)
         elif p.exists():
             p.unlink()
-    for d in (root / ".claude/skills", root / ".claude", root / ".cursor/rules", root / ".cursor"):
+    for d in (
+        root / ".claude/skills",
+        root / ".claude/agents",
+        root / ".claude",
+        root / ".cursor/rules",
+        root / ".cursor/agents",
+        root / ".cursor",
+    ):
         if d.is_dir() and not any(d.iterdir()):
             d.rmdir()

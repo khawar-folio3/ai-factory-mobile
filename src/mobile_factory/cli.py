@@ -4,16 +4,22 @@ import contextlib
 import getpass
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
+from importlib import resources
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 
-from . import __version__, adapters, config, doctor, events, metrics
+from . import __version__, adapters, config, doctor, events, metrics, viz
 from . import setup as machine
 from . import uninstall as remover
+from .config import VizConfig
 from .errors import FactoryError, Refused
 from .evals import Evals, report
 from .gitops import Git
@@ -26,8 +32,10 @@ from .outputs import MODELS
 from .pipeline import Engine
 from .platforms import make as make_platform
 from .platforms.base import snapshot_diff
+from .proc import has, which
+from .proc import run as proc_run
 from .state import RunStore
-from .wizard import Wizard, store_secret
+from .wizard import Wizard, store_secret, write_local
 
 app = typer.Typer(
     no_args_is_help=True, add_completion=False, help="Mobile Factory: ticket -> verified draft PR, with gates."
@@ -41,6 +49,11 @@ eval_app = typer.Typer(no_args_is_help=True, help="Replay past fixed tickets to 
 app.add_typer(secrets_app, name="secrets")
 app.add_typer(android_app, name="android")
 app.add_typer(guard_app, name="guardrail")
+viz_app = typer.Typer(
+    no_args_is_help=True,
+    help="Try the visualiser on its own, no factory run needed: status, start, stop, demo.",
+)
+app.add_typer(viz_app, name="viz")
 app.add_typer(eval_app, name="eval")
 
 RunOpt = Annotated[str | None, typer.Option("--run", help="Run id (default: the active run).")]
@@ -56,8 +69,246 @@ def _engine(run: str | None = None) -> Engine:
     return Engine.load(_lc(), run)
 
 
-def _say(text: str) -> None:
-    typer.echo(text)
+_MARKS = {
+    "ok": ("✓", "green"),
+    "warn": ("!", "yellow"),
+    "warning:": ("!", "yellow"),
+    "rejected:": ("✗", "red"),
+    "FAIL": ("✗", "red"),
+    "MISSING": ("✗", "red"),
+    "install": ("↓", "cyan"),
+    "login": ("→", "cyan"),
+    "manual": ("•", "yellow"),
+    "delete": ("✗", "red"),
+    "edit": ("~", "yellow"),
+    "note": ("•", "cyan"),
+    "skipped": ("○", "yellow"),
+}
+_SYMBOL_ONLY = {"ok", "warn", "warning:", "rejected:", "FAIL", "MISSING"}
+_STATUS = re.compile(r"^(\s*)(" + "|".join(map(re.escape, _MARKS)) + r")(\s+)(.*)$")
+
+
+def _fmt(line: str, hints: bool = False) -> str:
+    """Colour one output line: `== Section` headers, `ok/warn/FAIL …` status lines, `DOCTOR: …`, indented hints."""
+    if line.startswith("== "):
+        title = line[3:]
+        return typer.style(f"▌ {title}", fg="cyan", bold=True) + "\n" + typer.style("─" * 60, dim=True)
+    if m := _STATUS.match(line):
+        indent, word, gap, rest = m.groups()
+        sym, color = _MARKS[word]
+        name, _, detail = rest.partition("  ")
+        action = "" if word in _SYMBOL_ONLY else typer.style(word, fg=color) + gap
+        text = f"{indent}{typer.style(sym, fg=color, bold=True)} {action}{name}"
+        return text + (" " + typer.style(detail.strip(), dim=True) if detail.strip() else "")
+    if line.startswith("DOCTOR: "):
+        good = line.endswith("PASS")
+        return "\n" + typer.style(f"{'✓' if good else '✗'} {line}", fg="green" if good else "red", bold=True)
+    if hints and line.startswith("  · "):  # key/value row: cyan key column, plain value
+        key, _, value = line[4:].partition("  ")
+        return f"  {typer.style(f'{key:<14}', fg='cyan', bold=True)}{value.strip()}"
+    if hints and line.startswith("  "):
+        return typer.style(line, dim=True)
+    return line
+
+
+_SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+# On-screen labels for long work in the visualiser; the terminal keeps the full phase name.
+_SHORT = {
+    "Listing merged PRs": "PR list",
+    "Reading review comments": "comments",
+    "Resolving review threads": "threads",
+    "Tallying review chunks": "tally",
+    "Writing taste rules": "taste rules",
+}
+
+
+def _watch(root: Path | None, name: str) -> viz.Session | None:
+    """Long CLI work (harvest, distill) as its own session in the developer's visualiser, if one is on."""
+    if root is None:
+        return None
+    v = viz.make(config.load(root).cfg.viz)
+    return None if isinstance(v, viz.NullVisualizer) else viz.Session(v, root, name)
+
+
+class _Progress:
+    """Live `▸ phase  ██████░░░░  12/40` line per phase, replaced by `✓ phase (40)` when the next one starts."""
+
+    WIDTH = 24
+
+    def __init__(self, office: viz.Session | None = None) -> None:
+        self.live = sys.stdout.isatty()
+        self.phase, self.done, self.total, self.frame = "", 0, 0, 0
+        self.started = time.monotonic()
+        self.office = office
+        if office:
+            office.begin()
+
+    def _took(self) -> str:
+        s = int(time.monotonic() - self.started)
+        return f"{s // 60}:{s % 60:02d}" if s else ""
+
+    def __call__(self, phase: str, done: int, total: int) -> None:
+        if phase != self.phase:
+            self.close()
+            self.phase, self.started = phase, time.monotonic()
+            if self.office:
+                self.office.step(phase, _SHORT.get(phase, ""))
+            if not self.live:
+                typer.echo(f"  {phase}…")
+        self.done, self.total = done, total
+        if not self.live:
+            return
+        self.frame += 1
+        if total:
+            fill = self.WIDTH * done // total
+            bar = typer.style("█" * fill, fg="cyan") + typer.style("░" * (self.WIDTH - fill), dim=True)
+            tail = f"  {done}/{total}  {typer.style(f'{100 * done // total}%', dim=True)}"
+        else:
+            bar, tail = typer.style("working…", dim=True), ""
+        spin = typer.style(_SPIN[self.frame % len(_SPIN)], fg="cyan", bold=True)
+        took = typer.style(f"  {self._took()}", dim=True) if self._took() else ""
+        typer.echo(f"\r\033[2K  {spin} {phase}  {bar}{tail}{took}", nl=False)
+
+    def clear(self) -> None:
+        """Drop the live line without a ✓ (the phase did not finish)."""
+        if self.live and self.phase:
+            typer.echo("\r\033[2K", nl=False)
+        self.phase = ""
+        self.leave("stopped")
+
+    def leave(self, outcome: str = "done") -> None:
+        if self.office:
+            self.office.end(outcome)
+            self.office = None
+
+    def close(self) -> None:
+        if not self.phase:
+            return
+        if self.live:
+            typer.echo("\r\033[2K", nl=False)
+        if self.office:
+            self.office.step_done(self.phase)
+        facts = " · ".join(x for x in (str(self.total) if self.total else "", self._took()) if x)
+        typer.echo(
+            f"  {typer.style('✓', fg='green', bold=True)} {self.phase}{typer.style(f' ({facts})', dim=True) if facts else ''}"
+        )
+        self.phase = ""
+
+
+def _install_quietly(step: machine.Step) -> int:
+    """Installer output goes to a log; the terminal shows one spinner line, then ✓ or ✗ with the log tail."""
+    log = config.secrets_path().parent / "logs" / f"{step.action}-{step.tool}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    live, start = sys.stdout.isatty(), time.monotonic()
+    env = {**os.environ, "NONINTERACTIVE": "1", "HOMEBREW_NO_ENV_HINTS": "1"}
+    verb, done_verb = ("upgrading", "upgraded") if step.action == "upgrade" else ("installing", "installed")
+    if not live:
+        typer.echo(f"  {verb} {step.tool}…")
+    with log.open("w") as fh:
+        fh.write(f"$ {step.command}\n")
+        fh.flush()
+        proc = subprocess.Popen(  # noqa: S602 - fixed commands from the tool table or the lead's config
+            step.command, shell=True, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env
+        )
+        i = 0
+        while proc.poll() is None:
+            if live:
+                took = int(time.monotonic() - start)
+                spin = typer.style(_SPIN[i % len(_SPIN)], fg="cyan", bold=True)
+                typer.echo(
+                    f"\r\033[2K  {spin} {verb} {step.tool}  {typer.style(f'{took // 60}:{took % 60:02d}', dim=True)}",
+                    nl=False,
+                )
+            i += 1
+            time.sleep(0.1)
+    took = int(time.monotonic() - start)
+    if live:
+        typer.echo("\r\033[2K", nl=False)
+    if proc.returncode == 0:
+        typer.echo(
+            f"  {typer.style('✓', fg='green', bold=True)} {done_verb} {step.tool} {typer.style(f'({took}s)', dim=True)}"
+        )
+        return 0
+    tail = log.read_text(errors="ignore").strip().splitlines()[-6:]
+    typer.echo(
+        f"  {typer.style('✗', fg='red', bold=True)} {verb} {step.tool} failed {typer.style(f'({took}s)', dim=True)}"
+    )
+    for line in tail:
+        typer.echo(typer.style(f"    {line[:160]}", dim=True))
+    typer.echo(typer.style(f"    log: {log}\n    run it yourself: {step.command}", dim=True))
+    return proc.returncode
+
+
+def _run_watched(
+    cmd: list[str],
+    cwd: Path,
+    log: Path,
+    stage: Callable[[], tuple[str, int, int]],
+    *,
+    timeout: int = 1800,
+    office: viz.Session | None = None,
+) -> int:
+    """Run a long headless command into `log`; `stage()` (read from files it writes) drives the progress line."""
+    bar = _Progress(office)
+    start = time.monotonic()
+    with log.open("w") as fh:
+        proc = subprocess.Popen(
+            [which(cmd[0]) or cmd[0], *cmd[1:]], cwd=cwd, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL
+        )
+        try:
+            while proc.poll() is None:
+                if time.monotonic() - start > timeout:
+                    proc.kill()
+                    bar.clear()
+                    return 124
+                bar(*stage())
+                time.sleep(0.2)
+        except BaseException:
+            proc.kill()
+            bar.clear()
+            raise
+    if proc.returncode == 0:
+        bar(*stage())
+        bar.close()
+        bar.leave()
+    else:
+        bar.clear()
+    return proc.returncode
+
+
+def _home(p: Path) -> str:
+    return str(p).replace(str(Path.home()), "~")
+
+
+def _harvest_summary(meta: dict[str, Any]) -> str:
+    owners = ", ".join(meta.get("owners") or [])
+    return (
+        f"  ok  harvested  ({meta['comments']} comments on {meta['prs_with_owner_comments']} PRs,"
+        f" {meta['changes_requested']} from change requests)\n"
+        f"  PRs: {meta.get('prs_new', meta['prs_scanned'])} read, {meta.get('prs_already_processed', 0)} already"
+        f" processed{' (full re-extraction)' if meta.get('full') else ''} · owners: {owners}"
+        f" (from {meta.get('owner_source', '?')})"
+    )
+
+
+def _harvest(lc: config.LoadedConfig, **kw: Any) -> dict[str, Any]:
+    bar = _Progress(_watch(lc.root, "harvest"))
+    try:
+        meta = harvester.harvest(
+            lc.root, Git(lc.root).remote_repo(lc.cfg.vcs.remote), lc.state_dir / "data", progress=bar, **kw
+        )
+    except BaseException:
+        bar.clear()  # failed mid-phase: no ✓
+        raise
+    bar.close()
+    bar.leave()
+    return meta
+
+
+def _say(text: str, hints: bool = False) -> None:
+    typer.echo("\n".join(_fmt(ln, hints) for ln in text.split("\n")))
 
 
 def _human_only(action: str) -> None:
@@ -81,22 +332,76 @@ def version() -> None:
 def _setup(yes: bool, optional: bool) -> bool:
     try:
         loaded = config.load().cfg
-        cfg, figma = loaded.setup, config.figma_mode(loaded)
+        cfg, figma, agents = loaded.setup, config.figma_mode(loaded), list(loaded.agents.use)
+        pixel = loaded.viz.pixel_agents
     except FactoryError:
-        cfg, figma = None, "desktop"
-    p = machine.plan(machine.tools(cfg, figma), optional=optional)
-    _say(p.render())
+        cfg, figma, agents, pixel = None, "desktop", None, False
+    p = machine.plan(machine.tools(cfg, figma, agents, pixel), optional=optional)
+    typer.echo(_render_plan(p))
     if not p.todo:
-        _say("machine ready")
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            _offer_upgrades(machine.tools(cfg, figma, agents, pixel), yes)
+        _say("\n  ok  machine ready", hints=True)
         return True
     if os.environ.get("CI") or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        _say("\nrun `factory setup` in your own terminal: installs and browser logins need you there")
+        _say(
+            "\n  warn  run `factory setup` in your own terminal: installs and browser logins need you there", hints=True
+        )
         return False
+    typer.echo()
 
     def confirm(s: machine.Step) -> bool:
-        return yes or typer.confirm(f"{s.action} {s.tool}: {s.command}", default=True)
+        if yes:
+            return True
+        typer.echo(typer.style(f"    $ {s.command}", dim=True))
+        return _yes(f"{'Install' if s.action == 'install' else 'Log in to'} {s.tool}?", True)
 
-    return machine.execute(p, confirm, echo=_say)
+    ok = machine.execute(p, confirm, echo=lambda t: _say(t, hints=True), installer=_install_quietly)
+    _offer_upgrades(machine.tools(cfg, figma, agents, pixel), yes)
+    left = "  ok  machine ready" if ok else "  warn  steps left above: finish them, then `factory setup` again"
+    _say("\n" + left, hints=True)
+    return ok
+
+
+def _offer_upgrades(tool_list: list[machine.Tool], yes: bool = False) -> None:
+    """List newer versions of installed tools and upgrade them on a yes (quiet, one spinner line each)."""
+    ups = machine.outdated(tool_list)
+    if not ups:
+        _say("\n  ok  tools up to date  (Homebrew's last index; Claude Code and Cursor update themselves)", hints=True)
+        return
+    typer.echo("\n" + typer.style("  Updates available", bold=True))
+    for u in ups:
+        arrow = typer.style("↑", fg="cyan", bold=True)
+        typer.echo(f"    {arrow} {u.tool:<15} {typer.style(u.current, dim=True)} → {typer.style(u.latest, fg='cyan')}")
+    if not (yes or (sys.stdin.isatty() and _yes(f"Upgrade {'it' if len(ups) == 1 else f'all {len(ups)}'} now?", True))):
+        _say("    later: `factory setup` or `factory doctor` offers them again", hints=True)
+        return
+    for u in ups:
+        _install_quietly(machine.Step(u.tool, "upgrade", u.command))
+
+
+_PLAN_MARK = {"ok": ("✓", "green"), "install": ("↓", "cyan"), "login": ("→", "cyan"), "manual": ("•", "yellow")}
+_PLAN_MARK["missing"] = ("✗", "red")
+_PLAN_WORD = {"install": "install", "login": "log in", "manual": "manual step", "missing": "missing"}
+
+
+def _render_plan(p: machine.Plan) -> str:
+    """Tools grouped in setup order; ✓ ready, or what is left (install · log in) with the reason, dimmed."""
+    tools: dict[str, list[machine.Step]] = {}
+    for s in p.steps:
+        tools.setdefault(s.tool, []).append(s)
+    lines: list[str] = []
+    group: str | None = None
+    for name, steps in tools.items():
+        if steps[0].group != group:
+            group = steps[0].group
+            lines.append(("" if not lines else "\n") + typer.style(f"  {group or 'Other'}", bold=True))
+        todo = [s for s in steps if s.action != "ok"]
+        sym, color = _PLAN_MARK[todo[0].action if todo else "ok"]
+        what = typer.style(" · ".join(_PLAN_WORD[s.action] for s in todo), fg=color) + "  " if todo else ""
+        reason = next((s.note for s in todo if s.action in ("manual", "missing") and s.note), steps[0].why)
+        lines.append(f"    {typer.style(sym, fg=color, bold=True)} {name:<15} {what}{typer.style(reason, dim=True)}")
+    return "\n".join(lines)
 
 
 @app.command()
@@ -106,29 +411,361 @@ def setup(
 ) -> None:
     """Install and log in to what the factory needs on this machine: git, gh, twg, JDK, Android tools, Figma."""
     ok = _setup(yes, optional)
-    _say("\nnext: `factory doctor` in your project" if ok else "\nfinish the steps above, then `factory setup` again")
+    if ok:
+        _say("  next: `factory doctor` in your project", hints=True)
     raise typer.Exit(0 if ok else 1)
+
+
+class _Quit(typer.Abort):
+    """`q` at any prompt."""
+
+
+def _answer(raw: object) -> str:
+    text = str(raw).strip()
+    if text.lower() == "q":
+        raise _Quit()
+    return text
+
+
+def _yes(question: str, default: bool) -> bool:
+    d = "y" if default else "n"
+    while True:
+        raw = _answer(typer.prompt(_q(f"{question} (y/n)", d), default=d, show_default=False)).lower()
+        if raw in ("y", "yes", "n", "no"):
+            return raw.startswith("y")
+
+
+def _rollback_paths(root: Path) -> list[Path]:
+    exclude = Path(
+        proc_run(["git", "rev-parse", "--git-path", "info/exclude"], root).out.strip() or ".git/info/exclude"
+    )
+    secrets = {config.secrets_path()}
+    with contextlib.suppress(FactoryError):
+        secrets.add(config.secrets_path(config.load(root).cfg.secrets_file))
+    return [
+        config.config_path(root),
+        config.local_path(root),
+        exclude if exclude.is_absolute() else root / exclude,
+        *secrets,
+    ]
+
+
+@contextlib.contextmanager
+def _nothing_saved_on_quit(root: Path) -> Iterator[None]:
+    """`q` or Ctrl+C: put every file the wizard touches back the way it was."""
+    saved = {p: p.read_bytes() if p.is_file() else None for p in _rollback_paths(root)}
+    home = config.state_dir(root)
+    had_dir = home.exists()
+    try:
+        yield
+    except (typer.Abort, KeyboardInterrupt):
+        for p, data in saved.items():
+            if data is None:
+                p.unlink(missing_ok=True)
+            else:
+                p.write_bytes(data)
+        if not had_dir:
+            shutil.rmtree(home, ignore_errors=True)
+        _say("\nFAIL  quit  (nothing saved)")
+        raise typer.Exit(1) from None
+
+
+def _q(question: str, default: str = "") -> str:
+    tail = " " + typer.style(f"[{default}]", fg="cyan") if default else ""
+    return typer.style("? ", fg="magenta", bold=True) + typer.style(question, bold=True) + tail
+
+
+def _choose(question: str, options: list[str], default: int = 0) -> int:
+    typer.echo(_q(question))
+    for i, o in enumerate(options, 1):
+        if i == default + 1:
+            typer.echo(typer.style(f" ▸ {i}) {o}  (default)", fg="cyan", bold=True))
+        else:
+            typer.echo(f"   {i}) {o}")
+    while True:
+        raw = _answer(typer.prompt(typer.style("    choose", dim=True), default=str(default + 1)))
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return int(raw) - 1
+        _say(f"  pick 1-{len(options)}, or q to quit", hints=True)
 
 
 class _TerminalPrompter:
     def say(self, text: str) -> None:
-        _say(text)
+        _say(text, hints=True)
 
     def ask(self, question: str, default: str = "") -> str:
-        return str(typer.prompt(question, default=default, show_default=bool(default))).strip()
+        return _answer(typer.prompt(_q(question, default), default=default, show_default=False))
 
     def secret(self, question: str) -> str:
-        return getpass.getpass(f"{question}: ").strip()
+        return _answer(getpass.getpass(_q(question) + ": "))
 
     def choose(self, question: str, options: list[str], default: int = 0) -> int:
-        _say(question)
-        for i, o in enumerate(options, 1):
-            _say(f"  {i}) {o}")
-        n = int(typer.prompt("choose", default=default + 1, type=int))
-        return min(max(n, 1), len(options)) - 1
+        return _choose(question, options, default)
 
     def confirm(self, question: str, default: bool = True) -> bool:
-        return typer.confirm(question, default=default)
+        if question.startswith("\n"):
+            typer.echo()
+        return _yes(question.lstrip("\n"), default)
+
+
+_DISTILL_TOOLS = (
+    "Bash(jq:*),Bash(sed:*),Bash(grep:*),Bash(git:*),Bash(wc:*),Bash(head:*),Read,Write,Edit,Grep,Glob,Agent,Task"
+)
+_AGENTS = {
+    "claude": [
+        "claude",
+        "-p",
+        "{prompt}",
+        "--permission-mode",
+        "acceptEdits",
+        "--allowedTools",
+        _DISTILL_TOOLS,
+        "--agents",
+        "{agents}",
+        "--add-dir",
+        "{state}",
+    ],
+    "agent": ["agent", "-p", "{prompt}", "--force", "--output-format", "text"],
+    "cursor-agent": ["cursor-agent", "-p", "{prompt}", "--force", "--output-format", "text"],
+}
+_CLIS = {"claude": ["claude"], "cursor": ["agent", "cursor-agent"]}
+
+
+def _agent_cli(lc: config.LoadedConfig) -> str:
+    """First installed CLI of the agents this developer chose in `factory init`, in their order."""
+    return next((cli for a in lc.cfg.agents.use for cli in _CLIS[a] if has(cli)), "")
+
+
+def _distill(lc: config.LoadedConfig, refresh: bool = False) -> bool:
+    """Run the guardrail-learn skill headless with the chosen agent's CLI; True when taste rules were written."""
+    agent = _agent_cli(lc)
+    if not agent:
+        _say(f"  warning: no {' or '.join(lc.cfg.agents.use)} CLI installed; see Machine tools above", hints=True)
+        return False
+    skill = resources.files("mobile_factory.skills").joinpath("guardrail-learn.md").read_text()
+    data = lc.state_dir / "data"
+    source = "reviews-new.jsonl" if refresh else "reviews.jsonl"
+    mode = (
+        f"REFRESH: {lc.path(lc.cfg.guardrail.taste)} exists and already covers every older comment. Tally ONLY the"
+        f" new comments in {source} (plan below), then update the rules per step 6 (bump evidence, next free id for"
+        " new rules, never renumber or reuse ids). Do not re-read the older comments.\n"
+        if refresh
+        else ""
+    )
+    prompt = mode + (
+        f"The harvest is already done. Follow these instructions in this repo and write only"
+        f" {lc.path(lc.cfg.guardrail.taste)}"
+        f" (plus the tally files).\n\n{harvester.parallel_plan(data, source)}\n\n{skill}"
+    )
+    data.mkdir(parents=True, exist_ok=True)
+    agents = data / "distill-agents.json"
+    _, body = adapters._split(adapters.subagent_text("learn-tally", "inherit"))
+    tally = {"description": "Tally one line range of reviews.jsonl", "prompt": body}
+    agents.write_text(
+        json.dumps({"factory-learn-tally": {**tally, "model": lc.cfg.agents.model_for("learn-tally", "claude")}})
+    )
+    fill = {"{prompt}": prompt, "{agents}": str(agents), "{state}": str(lc.state_dir)}
+    cmd = [fill.get(part, part) for part in _AGENTS[agent]]
+    log = data / "distill.log"
+    taste = lc.path(lc.cfg.guardrail.taste)
+    for old in data.glob("tally-*.json"):
+        old.unlink()
+    parts = len(harvester.chunks(data, source=source))
+    t0 = time.time()
+
+    def written() -> bool:
+        return taste.is_file() and taste.stat().st_mtime >= t0
+
+    def stage() -> tuple[str, int, int]:
+        done = len(list(data.glob("tally-*.json")))
+        if written() or (parts and done >= parts):
+            return "Writing taste rules", 0, 0
+        return "Tallying review chunks", done, parts
+
+    _say(f"  distilling with {agent}  (log: {str(log).replace(str(Path.home()), '~')})", hints=True)
+    # with live hooks the office already shows this Claude session and its subagents: no second character
+    office = None if viz.make(lc.cfg.viz).live_hooks() else _watch(lc.root, "distill")
+    code = _run_watched(cmd, lc.root, log, stage, office=office)
+    if code != 0:
+        _say(f"  warning: {agent} exited with {code}; see the log", hints=True)
+    if written():
+        harvester.mark_distilled(data)
+        _say(f"  ok  taste rules  ({_home(taste)}: on your machine only)", hints=True)
+        return True
+    _say(f"  warning: {agent} did not write {_home(taste)}; see the log", hints=True)
+    return False
+
+
+OFFICE_HINT = (
+    "start it in this repo and keep it running: `pixel-agents` (opens your browser), or VS Code → Pixel Agents"
+)
+
+
+OFFICE_HOOKS_HINT = (
+    "open the office link above, then Settings → Instant Detection (Hooks) → on (live agents and subagents)"
+)
+
+
+def _taste_status(lc: config.LoadedConfig) -> tuple[int, str]:
+    """(rule count, last harvest date) of the existing taste rules."""
+    rules = sum(1 for ln in lc.path(lc.cfg.guardrail.taste).read_text().splitlines() if ln.startswith("### R"))
+    meta = lc.state_dir / "data" / "harvest_meta.json"
+    date = json.loads(meta.read_text()).get("harvested_at", "") if meta.is_file() else ""
+    return rules, date
+
+
+def _start_office(root: Path, ask: bool = True, prefs: VizConfig | None = None) -> viz.Office | None:
+    """Bring the developer's visualiser up the way they want it (settings, layout, live hooks) and say where it is."""
+    prefs = prefs or config.load(root).cfg.viz
+    v = viz.make(prefs)
+    if isinstance(v, viz.NullVisualizer):
+        return None
+    for note in v.prepare(root, prefs):
+        _say(f"  ok  {note}", hints=True)
+    if v.restart_needed(prefs):
+        if not ask or _yes(f"Restart the {v.title} so it turns on live hooks?", True):
+            v.stop()
+        else:
+            _say("  warning: " + OFFICE_HOOKS_HINT, hints=True)
+    if live := v.offices():
+        _say(f"  ok  {v.title} running  {live[0].url}", hints=True)
+        return live[0]
+    if not v.installed():
+        _say(f"  warning: {v.name} is not installed yet: run `factory setup`", hints=True)
+        return None
+    if ask and not _yes(f"Start the {v.title} now? (opens your browser, keeps running in the background)", True):
+        _say(f"  later: `factory viz start`, or {OFFICE_HINT}", hints=True)
+        return None
+    bar = _Progress()
+    bar(f"Starting the {v.title}", 0, 0)
+    started = v.start(root, config.secrets_path().parent / "logs" / f"{v.name}.log")
+    bar.clear()
+    if not started:
+        _say(f"  warning: the {v.title} did not start; see ~/.config/mobile-factory/logs/{v.name}.log", hints=True)
+        return None
+    stop = f"  · stop it with: kill {started.pid}" if started.pid else ""
+    _say(f"  ok  {v.title} running  {started.url}{stop}", hints=True)
+    if prefs.pixel_hooks and v.supports_live_hooks:
+        for _ in range(25):  # the tool installs its own hook right after it starts
+            if v.live_hooks():
+                break
+            time.sleep(0.2)
+        _say("  ok  live hooks on" if v.live_hooks() else "  warning: " + OFFICE_HOOKS_HINT, hints=True)
+    return started
+
+
+def _optional_extras(root: Path) -> None:
+    """Extras in the order you would want them: watch (office), then tools, then the long taste run."""
+    lc = config.load(root)
+    has_taste = lc.path(lc.cfg.guardrail.taste).is_file()
+    saved = config.read_yaml(config.local_path(root))
+    maestro_off = bool(((saved.get("setup") or {}).get("tools") or {}).get("maestro", {}).get("skip"))
+    maestro = not has("maestro") and not maestro_off
+    pixel = lc.cfg.viz.pixel_agents
+    pixel_answered = "pixel_agents" in (saved.get("viz") or {})
+    _say("\n== Extend initialisation", hints=True)
+    parts = iter(range(1, 10))
+
+    def part(title: str) -> None:
+        typer.echo("\n" + typer.style(f"  {next(parts)} · {title}", bold=True))
+
+    part("Visualisation (optional)")
+    if not pixel and pixel_answered:
+        _say("  ok  Pixel office off  (turn it on: `viz: {pixel_agents: true}` in your local.yaml)", hints=True)
+    elif not pixel:
+        _say(
+            "    Pixel Agents shows agents as pixel-art characters in an office: your Claude Code session and its\n"
+            "    subagents natively, plus a character per factory run (steps as tools, gates as permission bubbles)",
+            hints=True,
+        )
+        if _yes("Watch long-running work in the Pixel Agents office?", False):
+            _say(
+                "    live hooks let the office see your Claude Code sessions as they work"
+                " (Pixel Agents adds its hook to ~/.claude/settings.json; undo in its Settings)",
+                hints=True,
+            )
+            hooks = _yes("Turn on live hooks?", True)
+            write_local(lc.root, {"viz": {"pixel_agents": True, "pixel_hooks": hooks}})
+            pixel = True
+            tools = machine.tools(lc.cfg.setup, config.figma_mode(lc.cfg), [], pixel=True)
+            extra = machine.plan([t for t in tools if t.name in ("node", "pixel-agents")])
+            if extra.todo:
+                typer.echo(_render_plan(extra))
+                machine.execute(extra, lambda _s: True, echo=lambda t: _say(t, hints=True), installer=_install_quietly)
+        else:
+            write_local(lc.root, {"viz": {"pixel_agents": False}})  # remembered: not asked again
+            _say(
+                f"    skipped: turn it on any time with `viz: {{pixel_agents: true}}` in {_home(config.local_path(lc.root))}",
+                hints=True,
+            )
+    if pixel:
+        _start_office(lc.root)
+
+    if maestro:
+        part("UI flows (optional)")
+        _say(
+            "    maestro replays UI flows (flows/ in the factory home) when checking a fix on the emulator", hints=True
+        )
+        if not _yes("Install Maestro now?", False):
+            write_local(lc.root, {"setup": {"tools": {"maestro": {"skip": True}}}})  # remembered: not asked again
+            _say("    skipped: remove `setup.tools.maestro` from your local.yaml to be asked again", hints=True)
+        else:
+            tools = [t for t in machine.tools(lc.cfg.setup, config.figma_mode(lc.cfg)) if t.name == "maestro"]
+            machine.execute(
+                machine.plan(tools, optional=True),
+                lambda _s: True,
+                echo=lambda t: _say(t, hints=True),
+                installer=_install_quietly,
+            )
+
+    part("Taste rules")
+    full = False
+    if has_taste:
+        rules, date = _taste_status(lc)
+        _say(f"  ok  taste rules  ({rules} rules{f', harvested {date}' if date else ''})", hints=True)
+        pick = _choose(
+            "What should happen to them?",
+            [
+                "Keep them",
+                "Refresh with PRs merged since the last harvest",
+                "Rebuild from scratch (invalidate harvested data)",
+            ],
+            0,
+        )
+        if pick == 0:
+            return
+        full = pick == 2
+    else:
+        _say("    teach the guardrail your code owners' review habits, learned from merged PRs", hints=True)
+    if not _agent_cli(lc):
+        _say(
+            f"  warning: {' / '.join(lc.cfg.agents.use)} CLI not installed yet: you can harvest now,"
+            " distill once it is (`factory setup`)",
+            hints=True,
+        )
+    if not (has_taste or _yes("Harvest past PR reviews now? (takes a few minutes)", True)):
+        return
+    try:
+        meta = _harvest(lc, full=full)
+    except FactoryError as e:
+        _say(f"  warning: harvest skipped: {' '.join(str(e).split())[:160]}", hints=True)
+        return
+    _say(_harvest_summary(meta), hints=True)
+    data = lc.state_dir / "data"
+    if has_taste and not full:
+        if not (data / harvester.DISTILLED).is_file() and meta.get("prs_new") == 0:
+            harvester.mark_distilled(data)  # rules built before this record existed, and nothing new since
+        new = harvester.undistilled(data)
+        if not new:
+            _say("  ok  taste rules up to date  (no new review comments since they were built)", hints=True)
+            return
+        _say(f"    {len(new)} new review comments since the rules were built: only those are tallied", hints=True)
+    verb = "Update the taste rules" if has_taste else "Distill them into taste rules"
+    ask = bool(_agent_cli(lc)) and _yes(f"{verb} with your agent now?", True)
+    if ask and pixel:
+        _start_office(lc.root)  # the distill is the long agent run: offer to watch it
+    if not (ask and _distill(lc, refresh=has_taste and not full)):
+        _say("  later: ask your agent to run the `guardrail-learn` skill", hints=True)
 
 
 @app.command()
@@ -138,20 +775,23 @@ def init(
     defaults: bool = typer.Option(False, help="Non-interactive: write factory.yaml from detected values only."),
 ) -> None:
     """Guided setup: project settings (first time), then your Jira, GitHub, Slack and Figma access, then machine tools."""
-    root = Path.cwd()
+    root = config.repo_root()
     if defaults:
         for line in do_init(root, force=reconfigure):
             _say(f"  {line}")
-        _say(f"wrote {root / config.CONFIG_NAME}")
+        _say(f"wrote {config.config_path(root)}")
         return
     _human_only("factory init")
-    res = Wizard(root, _TerminalPrompter()).run(reconfigure=reconfigure)
-    if not skip_setup:
-        _say("\n== Machine tools")
-        _setup(yes=False, optional=False)
+    _say("  type q at any prompt to quit without saving", hints=True)
+    with _nothing_saved_on_quit(root):
+        res = Wizard(root, _TerminalPrompter()).run(reconfigure=reconfigure)
+        if not skip_setup:
+            _say("\n== Machine tools")
+            _setup(yes=False, optional=False)
+        _optional_extras(root)
     if res.todo:
         _say("\nstill to do:\n" + "\n".join(f"  - {t}" for t in res.todo))
-    _say("\nnext: `factory doctor`, then `factory install --target claude|cursor` (lead: commit the result)")
+    _say("\n  next: `factory doctor`, then `factory install` (nothing to commit: the repo is untouched)", hints=True)
 
 
 @app.command()
@@ -159,13 +799,17 @@ def uninstall(
     yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
     force: bool = typer.Option(False, help="Remove even if a run is still open."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be removed."),
+    keep_home: bool = typer.Option(False, "--keep-home", help="Keep this repo's settings, runs and taste rules."),
+    global_: bool = typer.Option(
+        False, "--global", help="Also remove the factory skills and subagents from ~/.claude and ~/.cursor."
+    ),
 ) -> None:
-    """Remove the factory from this repo: config, .factory/, installed skills/rules, MCP entries, ignore lines."""
+    """Remove the factory for this repo: its factory home, old in-repo files and, with --global, the user-level skills."""
     try:
         root = config.find_root()
     except FactoryError:
-        root = Path.cwd()  # half-removed repo: clean what is left
-    rm = remover.plan(root)
+        root = config.repo_root()  # half-removed repo: clean what is left
+    rm = remover.plan(root, home=not keep_home, global_=global_)
     _say(rm.render(root))
     if not (rm.delete or rm.edit) or dry_run:
         return
@@ -173,29 +817,39 @@ def uninstall(
         raise FactoryError(f"open runs {', '.join(rm.open_runs)}: finish or `factory abort` them, or pass --force")
     if not yes:
         _human_only("factory uninstall")
-        if not typer.confirm("Remove all of the above?", default=False):
+        if not _yes("Remove all of the above?", False):
             raise typer.Exit(1)
     remover.apply(root, rm)
-    _say("removed. Machine-wide items stay: the `factory` command and ~/.config/mobile-factory/secrets.env")
+    _say("ok  removed  (machine-wide items stay: the `factory` command and ~/.config/mobile-factory/secrets.env)")
 
 
 @app.command()
 def install(target: Annotated[str, typer.Option(help="claude | cursor | all")] = "all") -> None:
-    """Install node skills, MCP config and the agent rules block for Claude Code and/or Cursor."""
+    """Install the factory skills, subagents and MCP servers for Claude Code and/or Cursor, in your home folder only."""
     lc = _lc()
+    old = remover.plan(lc.root, home=False)  # integration files older versions put into the repo
+    if old.delete or old.edit:
+        _say("  moving the factory out of the repo:", hints=True)
+        _say(old.render(lc.root))
+        remover.apply(lc.root, old)
     targets = ["claude", "cursor"] if target == "all" else [target]
     for t in targets:
         if t not in ("claude", "cursor"):
             raise FactoryError(f"unknown target {t}")
         for p in adapters.install(lc, t):  # type: ignore[arg-type]
-            _say(f"  {t}: {p.relative_to(lc.root)}")
+            _say(f"  ok  {t}  ({_home(p)})", hints=True)
+    _say("  ok  repo untouched  (nothing to commit)", hints=True)
 
 
 @app.command(name="doctor")
 def doctor_cmd(offline: bool = typer.Option(False, help="Skip network checks.")) -> None:
     """Check tools, secrets, auth, device and config."""
-    text, ok = doctor.render(doctor.checks(_lc(), online=not offline))
+    lc = _lc()
+    text, ok = doctor.render(doctor.checks(lc, online=not offline))
     _say(text)
+    if not offline and sys.stdin.isatty() and sys.stdout.isatty():
+        c = lc.cfg
+        _offer_upgrades(machine.tools(c.setup, config.figma_mode(c), list(c.agents.use), c.viz.pixel_agents))
     raise typer.Exit(0 if ok else 1)
 
 
@@ -368,7 +1022,7 @@ def abort(
 @app.command(name="events")
 def events_cmd(run: RunOpt = None, follow: bool = typer.Option(False, "--follow", "-f")) -> None:
     """Print the event stream (JSONL): the source for metrics, Slack and the pixel office."""
-    log = _lc().factory_dir / "events.jsonl"
+    log = _lc().state_dir / "events.jsonl"
     seen = 0
     while True:
         evs = events.read(log, run)
@@ -490,23 +1144,30 @@ def g_learn(
     bases: str = typer.Option("", help="Comma-separated base branches."),
     owners: str = typer.Option("", help="Comma-separated reviewer logins (default: CODEOWNERS, then top reviewers)."),
     since: str = typer.Option("", help="YYYY-MM-DD, merge into existing data."),
+    full: bool = typer.Option(False, "--full", help="Invalidate all harvested data and extract every PR again."),
 ) -> None:
     """Harvest code-owner review comments from merged PRs into .factory/data/reviews.jsonl (then distill with the guardrail-learn skill)."""
     lc = _lc()
-    repo = Git(lc.root).remote_repo(lc.cfg.vcs.remote)
-    meta = harvester.harvest(
-        lc.root,
-        repo,
-        lc.factory_dir / "data",
+    meta = _harvest(
+        lc,
         limit=limit,
         bases=[b for b in bases.split(",") if b] or None,
         owners=[o for o in owners.split(",") if o] or None,
         since=since,
+        full=full,
     )
-    _say(json.dumps(meta, indent=2))
+    _say(_harvest_summary(meta), hints=True)
+    _say("\n" + harvester.parallel_plan(lc.state_dir / "data"))
     _say(
         "next: ask the agent to distill with the `guardrail-learn` skill into .factory/taste.md, then have the code owner approve it"
     )
+
+
+@guard_app.command("chunks")
+def g_chunks() -> None:
+    """Print the parallel tally plan for the harvested reviews (one subagent per line range)."""
+    lc = _lc()
+    _say(harvester.parallel_plan(lc.state_dir / "data"))
 
 
 @guard_app.command("check")
@@ -559,3 +1220,85 @@ def main() -> None:
     except FactoryError as e:
         typer.echo(f"error: {e}", err=True)
         raise SystemExit(e.exit_code) from None
+
+
+# ---------- visualiser (works without a factory run, and without factory.yaml) ----------
+
+ToolOpt = Annotated[str, typer.Option("--tool", help="Visualiser backend (default: this repo's, else pixel-agents).")]
+
+
+def _viz_here(tool: str) -> tuple[Path, VizConfig]:
+    """This repo's visualiser settings, switched on; outside a set-up repo, the defaults."""
+    root = config.repo_root()
+    try:
+        prefs = config.load(root).cfg.viz.model_copy()
+    except FactoryError:
+        prefs = VizConfig()
+    prefs.pixel_agents = True
+    if tool:
+        prefs.tool = tool
+    if prefs.tool not in viz.BACKENDS:
+        raise FactoryError(f"unknown visualiser {prefs.tool}; known: {', '.join(viz.BACKENDS)}")
+    return root, prefs
+
+
+@viz_app.command("status")
+def viz_status(tool: ToolOpt = "") -> None:
+    """Which visualiser, whether it is installed and running, and where to open it."""
+    _, prefs = _viz_here(tool)
+    v = viz.make(prefs)
+    live = v.offices()
+    _say(f"== {v.title} ({v.name})", hints=True)
+    _say(f"  {'ok' if v.installed() else 'FAIL'}  installed", hints=True)
+    _say(f"  {'ok' if live else 'warn'}  running  {live[0].url if live else '`factory viz start`'}", hints=True)
+    if v.supports_live_hooks:
+        _say(f"  {'ok' if v.live_hooks() else 'warn'}  live hooks", hints=True)
+
+
+@viz_app.command("start")
+def viz_start(tool: ToolOpt = "") -> None:
+    """Prepare and start the visualiser (settings, layout, live hooks), then print its link."""
+    root, prefs = _viz_here(tool)
+    if not _start_office(root, ask=False, prefs=prefs):
+        raise typer.Exit(1)
+
+
+@viz_app.command("stop")
+def viz_stop(tool: ToolOpt = "") -> None:
+    """Stop every running instance of the visualiser."""
+    _, prefs = _viz_here(tool)
+    viz.make(prefs).stop()
+    _say("  ok  stopped", hints=True)
+
+
+@viz_app.command("demo")
+def viz_demo(
+    tool: ToolOpt = "",
+    steps: int = typer.Option(3, help="Steps the demo session works through."),
+    subagents: int = typer.Option(3, help="Parallel subagents spawned during the middle step (0 = none)."),
+    seconds: float = typer.Option(3.0, help="How long each step lasts."),
+) -> None:
+    """Play a fake session: it arrives, works through steps, fans out subagents, then leaves. No factory needed."""
+    root, prefs = _viz_here(tool)
+    v = viz.make(prefs)
+    if not v.offices():
+        raise FactoryError(f"the {v.title} is not running: `factory viz start` first")
+    s = viz.Session(v, root, "demo")
+    _say(f"  watch it: {v.offices()[0].url}", hints=True)
+    bar = _Progress()
+    s.begin()
+    for n in range(1, steps + 1):
+        title = f"Demo step {n}"
+        s.step(title, f"step {n}")
+        fan = subagents if n == (steps + 1) // 2 else 0
+        for k in range(1, fan + 1):
+            s.subagent(f"helper {k}")
+        for tick in range(int(seconds * 5)):
+            bar(title + (f" with {fan} subagents" if fan else ""), tick + 1, int(seconds * 5))
+            time.sleep(0.2)
+        for _ in range(fan):
+            s.subagent_done()
+        s.step_done(title)
+    bar.close()
+    s.end("done")
+    _say("  ok  demo session finished", hints=True)

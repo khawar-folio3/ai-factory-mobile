@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -9,6 +8,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
+from .config import state_dir
 from .errors import FactoryError
 from .gitops import Git
 from .state import RunState
@@ -43,7 +43,7 @@ class Evals:
         self.git = Git(root)
         # cases and results live in the main checkout, also when called from an eval worktree
         self.root = Path(self.git("rev-parse", "--path-format=absolute", "--git-common-dir")).parent
-        self.dir = self.root / ".factory" / "evals"
+        self.dir = state_dir(self.root) / "evals"
 
     def case_file(self, case_id: str) -> Path:
         return self.dir / "cases" / f"{case_id}.yaml"
@@ -82,25 +82,7 @@ class Evals:
         if wt.exists():
             raise FactoryError(f"{wt} exists: `git worktree remove {wt}` first")
         self.git("worktree", "add", "--detach", str(wt), c.base_commit)
-        # the old commit predates the factory: bring today's config, guardrail knowledge and tickets along
-        for rel in (
-            "factory.yaml",
-            ".factory/taste.md",
-            ".factory/slop.yaml",
-            ".factory/knowledge",
-            ".factory/tickets",
-            ".factory/flows",
-        ):
-            src, dst = self.root / rel, wt / rel
-            if src.is_dir():
-                shutil.copytree(src, dst, dirs_exist_ok=True)
-            elif src.is_file():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-        exclude = Path(self.git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        lines = exclude.read_text().splitlines() if exclude.is_file() else []
-        exclude.write_text("\n".join([*lines, *(p for p in ("/factory.yaml", "/.factory/") if p not in lines)]) + "\n")
+        # nothing to copy: the worktree shares this repo's factory home (config, taste, tickets)
         return wt
 
     def score(self, case_id: str, st: RunState, run_files: list[str]) -> EvalScore:

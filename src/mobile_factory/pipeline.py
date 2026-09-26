@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from . import autonomy, events
+from . import autonomy, events, viz
 from .config import LoadedConfig
 from .errors import FactoryError, Refused, Stop
 from .gitops import Git
@@ -77,6 +77,12 @@ AGENT_TASKS = {
 }
 
 
+# Independent read-only sub-tasks of a step: started together, then the step's own agent merges them.
+PARALLEL = {"review": ["review-correctness", "review-taste", "review-detectors"]}
+# Read-only helpers started together with the step's own agent; their file feeds a later step.
+ALONGSIDE = {"reproduce": ["locate"]}
+
+
 def _slug(text: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", text.lower())).strip("-")[:40]
 
@@ -96,9 +102,9 @@ class Engine:
         sinks: list[events.Sink] = []
         if self.cfg.notifications.slack_webhook:
             sinks.append(events.slack_sink(self.cfg.notifications.slack_webhook))
-        if self.cfg.viz.pixel_agents:
-            sinks.append(events.PixelAgentsSink(lc.root))
-        self.bus = events.EventBus(lc.factory_dir / "events.jsonl", sinks)
+        if not isinstance(v := viz.make(self.cfg.viz), viz.NullVisualizer):
+            sinks.append(viz.event_sink(v, lc.root))
+        self.bus = events.EventBus(lc.state_dir / "events.jsonl", sinks)
 
     # ---------- lifecycle ----------
 
@@ -330,16 +336,45 @@ class Engine:
             f"TASK  {AGENT_TASKS[node.name]}",
             f"SKILL {skill}",
             f"RUN   {self.dir}  (ticket.json, outputs, context/)",
+            f"HOME  {self.lc.state_dir}  (taste.md, knowledge/, flows/, tickets/)",
         ]
         if fail := self.out("_last_failure"):
             lines.append(f"LAST FAILURE ({fail['node']}): {fail['reason'][-1500:]}")
         if node.name == "review":
             lines.append(f"CONTEXT {self.dir / 'context'}  ->  {self.out('_review_ctx').get('summary', '')}")
+        lines.extend(self._delegation(node.name))
         lines.append(
             f"SUBMIT write JSON then: factory submit {node.name} <file.json>   (schema: factory schema {node.name})"
         )
         lines.append(f"EXAMPLE {json.dumps(EXAMPLES[node.name])}")
         return "\n".join(lines)
+
+    def _delegation(self, step: str) -> list[str]:
+        models = self.cfg.agents.models
+        parts = PARALLEL.get(step, [])
+        lines = []
+        if parts:
+            out = self.dir / "context"
+            how = "start ALL of these in one message (parallel)" if self.cfg.agents.parallel else "run these in turn"
+            lines.append(f"PARALLEL {how}; each writes findings JSON (schema: factory schema review), read-only:")
+            lines += [
+                f"  factory-{p} ({models.get(p, 'inherit')})  ->  {out / f'{p}.json'}"
+                f"  (description: {p.removeprefix('review-')})"
+                for p in parts
+            ]
+            lines.append(f"THEN     factory-{step} merges those files, dedupes, applies fixes and writes the output")
+        lines.append(
+            f"AGENT    delegate to the `factory-{step}` subagent ({models.get(step, 'inherit')}); "
+            "if your tool has no subagents, do it yourself"
+        )
+        for helper in ALONGSIDE.get(step, []) if self.cfg.agents.parallel else []:
+            lines.append(
+                f"ALONGSIDE start `factory-{helper}` ({models.get(helper, 'inherit')}) in the SAME message, read-only  "
+                f"->  {self.dir / 'context' / f'{helper}.json'}  (description: {helper})"
+            )
+        if step == "fix" and (hint := self.dir / "context" / "locate.json").is_file():
+            lines.append(f"HINT     {hint}  (code map from locate: start there, confirm before editing)")
+        return lines
 
     def progress(self) -> str:
         names = [n.name for n in self.nodes]
@@ -418,6 +453,18 @@ def _branch(e: Engine) -> dict[str, Any]:
     return {"branch": name, "checkpoint": e.st.checkpoint, "tracker": msg}
 
 
+def _tested(e: Engine, rep: dict[str, Any], ver: dict[str, Any], snaps: str) -> str:
+    """Plain words a reviewer would write: where it was reproduced, what now works, what else was checked."""
+    steps = "; ".join(rep.get("steps", []))
+    lines = [f"- Reproduced on {e.cfg.android.variant} (emulator): {steps}" if steps else ""]
+    if ver.get("defect_fixed"):
+        lines.append("- After the fix the issue no longer occurs")
+    if ver.get("adjacent_unchanged"):
+        lines.append("- Related screens behave as before")
+    lines += [f"  - {ln[2:]}" for ln in snaps.splitlines() if ln.startswith("- ")]
+    return "\n".join(ln for ln in lines if ln)
+
+
 def _changed(e: Engine) -> tuple[list[str], list[difflib.FileDiff]]:
     files = e.git.changed_files(e.st.checkpoint)
     return files, difflib.parse(e.git.diff(e.st.checkpoint, files))
@@ -463,7 +510,6 @@ def _pr_preview(e: Engine) -> dict[str, Any]:
         f"- {label}: {change.strip().splitlines()[0] if change.strip() else ''}"
         for label, change in snapshot_diff(e.dir / "snapshots")
     )
-    files = e.git.changed_files(f"{e.cfg.vcs.remote}/{e.st.base}")
     body = (
         resources.files("mobile_factory.templates")
         .joinpath("pr-body.md")
@@ -472,11 +518,7 @@ def _pr_preview(e: Engine) -> dict[str, Any]:
             ticket_url=ticket_url or e.st.ticket,
             root_cause=fix.get("root_cause", ""),
             changes=fix.get("changes", ""),
-            before_after=f"Repro: {'; '.join(rep.get('steps', []))}\n{snaps}".strip(),
-            tested=f"- {e.cfg.android.variant} on emulator: defect fixed={ver.get('defect_fixed')}, adjacent unchanged={ver.get('adjacent_unchanged')}\n- {e.out('checks').get('checks', '')}",
-            risk_score=e.st.risk.score if e.st.risk else "?",
-            level=e.st.level,
-            files=", ".join(files[:12]),
+            tested=_tested(e, rep, ver, snaps),
             notes=fix.get("notes", ""),
         )
     )

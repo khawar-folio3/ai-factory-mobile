@@ -1,0 +1,29 @@
+name: Bug report
+description: Something in the factory behaved wrongly
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Command you ran, what you expected, what you got. Include `factory status` and the failing `factory next` output.
+    validations:
+      required: true
+  - type: textarea
+    id: events
+    attributes:
+      label: Relevant events
+      description: Lines from `factory events --run <id>`. Remove ticket content and anything private.
+      render: json
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`factory version`, Python version, OS"
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      options: [Claude Code, Cursor, Other]

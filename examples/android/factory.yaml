@@ -1,0 +1,47 @@
+version: 1
+
+project:
+  name: demo-android
+  platform: android
+  base_branch: develop
+  branch_pattern: "bugfix/{key}-{slug}"
+  local_only_paths: ["local.properties"]
+
+android:
+  app_module: app
+  modules: [app, core/ui, feature/profile]
+  variant: StagingDebug
+  application_id: com.example.demo.staging
+  launch_activity: com.example.demo.MainActivity
+  avd: Pixel_8_API_35
+  deeplink_scheme: demo
+
+autonomy:
+  ceiling: 3
+
+tracker:
+  kind: jira
+  provider: rest
+  site: example.atlassian.net
+  email: "${JIRA_EMAIL}"
+  token: "${JIRA_API_TOKEN}"
+  projects: [DEMO]
+  transitions: {start: "In Progress", review: "In Review"}
+
+guardrail:
+  commands: ["./gradlew detekt"]
+
+notifications:
+  slack_webhook: "${SLACK_WEBHOOK_URL}"
+
+viz:
+  pixel_agents: true
+
+mcp_servers:
+  figma:
+    url: http://127.0.0.1:3845/mcp
+  atlassian:
+    url: https://mcp.atlassian.com/v1/sse
+  github:
+    url: https://api.githubcopilot.com/mcp/
+    headers: {Authorization: "Bearer ${GITHUB_TOKEN}"}

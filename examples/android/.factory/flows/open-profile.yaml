@@ -1,0 +1,5 @@
+appId: com.example.demo.staging
+---
+- launchApp
+- tapOn: "Profile"
+- assertVisible: "Edit profile"

@@ -1,0 +1,87 @@
+# Mobile Factory configuration. Commit this file; it must never hold a secret.
+# Secrets are ${VAR} references resolved from the environment or the per-machine secrets file
+# (default ~/.config/mobile-factory/secrets.env, set with `factory secrets set VAR`).
+version: 1
+
+project:
+  name: __NAME__
+  platform: android
+  base_branch: __BASE__          # or "ask": pass --base on every run
+  branch_pattern: "bugfix/{key}-{slug}"
+  branch_pattern_by_type:
+    Task: "feature/{key}-{slug}"
+  forbidden_paths:               # the fix may never touch these
+    - "**/build.gradle*"
+    - "gradle/**"
+    - "gradle.properties"
+    - "**/AndroidManifest.xml"
+    - "**/proguard-rules.pro"
+    - "**/*.jks"
+    - ".github/**"
+  local_only_paths: []           # files allowed to stay modified locally (e.g. a flavor switch); never committed
+
+android:
+  app_module: __APP_MODULE__
+  modules: __MODULES__
+  variant: Debug                 # gradle variant suffix: install<variant>, lint<variant>, test<variant>UnitTest
+  application_id: "__APP_ID__"
+  launch_activity: "__LAUNCHER__"
+  avd: ""                        # booted automatically when no device is attached
+  deeplink_scheme: ""
+
+autonomy:
+  ceiling: 2                     # 0 manual … 4 autonomous; the risk score can only lower it
+  thresholds: {4: 15, 3: 35, 2: 55, 1: 75}
+
+gates:                           # a gate is automatic when the run's level >= auto_at (5 = always human)
+  plan:   {auto_at: 1}
+  repro:  {auto_at: 2}
+  diff:   {auto_at: 3}
+  review: {auto_at: 3}
+  pr:     {auto_at: 4}
+
+limits:
+  max_fix_attempts: 2
+  max_review_rounds: 2
+  require_repro: true
+  rollback_on_fail: true
+
+tracker:
+  kind: file                     # file (.factory/tickets/<KEY>.md) | jira
+  provider: rest                 # rest | twg
+  site: ""                       # acme.atlassian.net
+  email: "${JIRA_EMAIL:-}"
+  token: "${JIRA_API_TOKEN:-}"
+  projects: []
+  allowed_types: [Bug, Task]
+  block_labels: [no-bot, security, needs-design]
+  transitions: {}                # e.g. {start: "In Development", review: "Quality Assurance"}
+
+vcs:
+  remote: origin
+  draft: true
+  pr_label: ""
+  forbid_attribution: true
+
+guardrail:
+  taste: .factory/taste.md       # learned from past PR reviews: factory guardrail learn
+  knowledge: .factory/knowledge  # tribal knowledge, same rule format, hand-written
+  slop: true                     # deterministic AI-slop detectors (override in .factory/slop.yaml)
+  commands: []                   # extra checks, e.g. ["./gradlew detekt"]
+
+notifications:
+  slack_webhook: "${SLACK_WEBHOOK_URL:-}"
+
+viz:
+  pixel_agents: false
+
+# Rendered into .mcp.json (Claude Code) and .cursor/mcp.json (Cursor) by `factory install`.
+# Values stay ${VAR} references; launch the tool with `factory exec -- claude` or `factory exec -- cursor .`
+mcp_servers: {}
+#  figma:
+#    url: http://127.0.0.1:3845/mcp
+#  atlassian:
+#    url: https://mcp.atlassian.com/v1/sse
+#  github:
+#    url: https://api.githubcopilot.com/mcp/
+#    headers: {Authorization: "Bearer ${GITHUB_TOKEN}"}

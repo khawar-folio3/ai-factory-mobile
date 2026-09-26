@@ -1,0 +1,74 @@
+# Deterministic "AI slop" detectors. Matched against ADDED lines only.
+# Override or disable per repo in .factory/slop.yaml (same shape; `enabled: false` turns a rule off).
+- id: S001
+  title: Narrating comment
+  severity: major
+  applies: ["**/*.kt", "**/*.java", "**/*.swift", "**/*.m"]
+  pattern: '^\s*//+\s*(Step \d+|This (function|method|class|code)\b|Now (we|let)|Here we|Added\b|Updated\b|Changed\b|Fixed\b|New:)'
+  fix: "delete it; the code says what, the commit says why."
+- id: S002
+  title: Doc comment on new code
+  severity: nit
+  applies: ["**/*.kt", "**/*.java", "**/*.swift"]
+  pattern: '^\s*(/\*\*|///\s)'
+  fix: "drop KDoc/JavaDoc/DocC unless it is public API the repo documents."
+- id: S003
+  title: Non-null assertion
+  severity: major
+  applies: ["**/*.kt"]
+  pattern: '[A-Za-z0-9_)\]]!!'
+  fix: "use ?.let, ?: or a smart cast instead of !!."
+- id: S004
+  title: Debug output left in
+  severity: major
+  applies: ["**/*.kt", "**/*.java", "**/*.swift"]
+  pattern: '\bprintln\(|\bSystem\.(out|err)\.|\.printStackTrace\(\)|\bLog\.[dv]\(|^\s*print\(|\bdebugPrint\(|\bNSLog\('
+  fix: "remove it or use the project logger."
+- id: S005
+  title: TODO without a ticket
+  severity: nit
+  applies: ["**"]
+  pattern: '\b(TODO|FIXME|HACK)\b(?!.*[A-Z][A-Z0-9]+-\d+)'
+  fix: "link a ticket key or resolve it now."
+- id: S006
+  title: Commented-out code
+  severity: major
+  applies: ["**/*.kt", "**/*.java", "**/*.swift"]
+  pattern: '^\s*//\s*(val|var|let|fun|func|if|return|import|override|private|public|\}|[a-zA-Z_][\w.]*\([^)]*\)\s*;?\s*$)'
+  fix: "delete it; git keeps history."
+- id: S007
+  title: Swallowed exception
+  severity: blocker
+  applies: ["**/*.kt", "**/*.java", "**/*.swift"]
+  pattern: 'catch\s*(\([^)]*\))?\s*\{\s*\}|try\?\s'
+  fix: "handle, log or rethrow; never swallow silently."
+- id: S008
+  title: GlobalScope / runBlocking in app code
+  severity: major
+  applies: ["**/src/main/**/*.kt"]
+  pattern: '\bGlobalScope\.|\brunBlocking\s*[({]'
+  fix: "use a lifecycle-bound scope (viewModelScope, lifecycleScope) or a suspend function."
+- id: S009
+  title: Thread sleep
+  severity: major
+  applies: ["**/src/main/**/*.kt", "**/src/main/**/*.java", "**/*.swift"]
+  pattern: '\bThread\.sleep\(|\bsleep\(\d|usleep\('
+  fix: "use delay(), a callback or an idling resource."
+- id: S010
+  title: Hardcoded user-facing string
+  severity: nit
+  applies: ["**/src/main/**/*.kt", "**/*View.swift"]
+  pattern: '\b(Text|setText|Toast\.makeText|\.text\s*=)\s*\(?\s*"[A-Za-z][^"]{3,}"'
+  fix: "move it to string resources / Localizable.strings."
+- id: S011
+  title: Force unwrap / force cast
+  severity: major
+  applies: ["**/*.swift"]
+  pattern: '\w[!]\.|\bas!\s|\btry!\s'
+  fix: "use guard let / if let / as? / do-catch."
+- id: S012
+  title: Catch-all exception
+  severity: nit
+  applies: ["**/*.kt", "**/*.java"]
+  pattern: 'catch\s*\(\s*\w+\s*:\s*(Exception|Throwable)\s*\)|catch\s*\(\s*(Exception|Throwable)\s+\w+\s*\)'
+  fix: "catch the specific exception the call can throw."

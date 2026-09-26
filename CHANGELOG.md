@@ -1,0 +1,16 @@
+# Changelog
+
+All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and the project uses [Semantic Versioning](https://semver.org/).
+
+## [0.1.0] - Unreleased
+
+### Added
+- Bugfix pipeline (13 nodes) with resumable run state and bounded retries with rollback to a checkpoint.
+- Risk-scored autonomy (levels 0–4) and five gates; TTY-only human approval with a one-time code.
+- Guardrail: hard limits, 12 AI-slop detectors, owner-taste harvesting from merged PRs, tribal-knowledge rules.
+- Android platform: gradle checks for touched modules, install, uiautomator screen state, snapshots and diff, tap/wait/deeplink, Maestro flows.
+- Trackers: Jira REST, Atlassian `twg` CLI, Markdown ticket files.
+- Single `factory.yaml` with `${VAR}` secrets, per-machine secrets file, plaintext-secret refusal, `factory exec`.
+- Claude Code and Cursor adapters (skills/rules, MCP config, agent instructions block).
+- Event stream with Slack and Pixel Agents sinks; metrics; eval harness replaying past tickets.

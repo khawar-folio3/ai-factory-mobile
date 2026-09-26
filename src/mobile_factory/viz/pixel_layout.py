@@ -11,12 +11,13 @@ WALL, VOID = 0, 255
 MARK = "mobile-factory"  # layouts we wrote carry this; any other layout.json is the developer's own
 OLD_AREA = "Factory"  # a wing area of earlier versions; its folder mappings are removed
 
-# One open room of desk pods: a desk with a PC and three benches facing it. A session takes one bench; Pixel Agents
-# never seats subagents but drops each on the free walkable tile nearest its parent, and free seats are walkable,
-# so a session's subagents land on the benches beside it. Pods are 3 tiles apart so neighbours never mix.
-PODS_ACROSS, PODS_DOWN = 4, 3
-POD_W, POD_H, GAP = 3, 3, 3  # desk 3x2 + bench row; walkway between pods
-MARGIN = 2  # floor between the walls and the outer pods
+# One open room of single-seat desks, far enough apart that the labels floating over neighbours never overlap
+# (a label is about 6 tiles wide). Every session gets its own desk; parallel factory work runs as separate
+# sessions for exactly that reason (Pixel Agents never seats subagents: they stand next to their parent).
+PODS_ACROSS, PODS_DOWN = 6, 4  # wide, like the screens it is watched on
+POD_W, POD_H = 3, 3  # desk 3x2 + the bench row
+GAP_ACROSS, GAP_DOWN = 10, 3  # 13 tiles between seats across, plenty of room for long labels
+MARGIN = 2  # floor between the walls and the outer desks
 WALL_DECOR = ("SMALL_PAINTING", "CLOCK", "LARGE_PAINTING", "DOUBLE_BOOKSHELF", "SMALL_PAINTING_2")
 
 
@@ -37,8 +38,8 @@ def open_office(base: dict[str, Any]) -> dict[str, Any]:
     floor, floor_color = base["tiles"][floor_at], base["tileColors"][floor_at]
     wall_color = base["tileColors"][wall_at]
 
-    inner_w = 2 * MARGIN + PODS_ACROSS * POD_W + (PODS_ACROSS - 1) * GAP
-    inner_h = 2 * MARGIN + PODS_DOWN * POD_H + (PODS_DOWN - 1) * GAP
+    inner_w = 2 * MARGIN + PODS_ACROSS * POD_W + (PODS_ACROSS - 1) * GAP_ACROSS
+    inner_h = 2 * MARGIN + PODS_DOWN * POD_H + (PODS_DOWN - 1) * GAP_DOWN
     top = 2  # wall row; the row above it holds wall decor, like the default office
     cols, rows = inner_w + 2, top + 1 + inner_h + 1  # side walls; a void row under the floor, as in the default
     tiles: list[int] = []
@@ -62,17 +63,24 @@ def open_office(base: dict[str, Any]) -> dict[str, Any]:
 
     for down in range(PODS_DOWN):
         for across in range(PODS_ACROSS):
-            col = 1 + MARGIN + across * (POD_W + GAP)
-            row = top + 1 + MARGIN + down * (POD_H + GAP)
+            col = 1 + MARGIN + across * (POD_W + GAP_ACROSS)
+            row = top + 1 + MARGIN + down * (POD_H + GAP_DOWN)
             put("DESK_FRONT", row, col)
             put("PC_FRONT_OFF", row, col + 1)
-            for seat in range(POD_W):  # three benches facing the desk
-                put("CUSHIONED_BENCH", row + 2, col + seat)
+            put("CUSHIONED_BENCH", row + 2, col + 1)  # one seat, facing the PC
     step = (cols - 4) // (len(WALL_DECOR) - 1)
     for i, kind in enumerate(WALL_DECOR):
         put(kind, top - 1, 2 + i * step)
-    for row, col in ((top + 1, 1), (top + 1, cols - 2), (rows - 2, 1), (rows - 2, cols - 2)):
-        put("PLANT", row, col)
+    # tall plants in the four corners; potted plants centred in each walkway crossing between desk rows
+    put("LARGE_PLANT", top + 1, 1)
+    put("LARGE_PLANT", top + 1, cols - 3)
+    put("LARGE_PLANT", rows - 4, 1)
+    put("LARGE_PLANT", rows - 4, cols - 3)
+    for down in range(PODS_DOWN - 1):
+        row = top + 1 + MARGIN + down * (POD_H + GAP_DOWN) + POD_H + GAP_DOWN // 2 - 1
+        for across in range(1, PODS_ACROSS, 2):  # every other crossing: calm, not cluttered
+            col = 1 + MARGIN + across * (POD_W + GAP_ACROSS) - GAP_ACROSS // 2 - 1
+            put("PLANT" if across % 4 == 1 else "PLANT_2", row, col)
 
     return {
         "version": base.get("version", 1),

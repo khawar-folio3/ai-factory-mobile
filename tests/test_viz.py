@@ -84,6 +84,7 @@ def test_pixel_payloads(tmp_path: Path) -> None:
     assert helper["tool_name"] == "Agent" and helper["tool_input"]["description"] == "tally 1"  # "Subtask: tally 1"
     assert p(tmp_path, "r1", "waiting")[0]["notification_type"] == "permission_prompt"
     assert [x["hook_event_name"] for x in p(tmp_path, "r1", "end", outcome="done")] == ["Stop", "SessionEnd"]
+    assert [x["hook_event_name"] for x in p(tmp_path, "r1", "begin")] == ["SessionStart", "PostToolUse"]
 
 
 def test_pixel_without_servers_is_silent(tmp_path: Path) -> None:
@@ -151,3 +152,19 @@ def test_labels_stay_short_so_they_do_not_overlap(fake: type[FakeViz], tmp_path:
     s.subagent("a very long subagent description")
     shorts = [f.get("short") or f.get("title") for _, k, f in fake.sent if k in ("step", "subagent")]
     assert shorts == ["tally", "Resolving", "a"] and all(len(x) <= LABEL_MAX for x in shorts)
+
+
+def test_viz_demo_parallel_sessions_each_begin_and_end(
+    fake: type[FakeViz], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(
+        app,
+        ["viz", "demo", "--tool", "fake", "--steps", "1", "--subagents", "0", "--seconds", "0.2", "--sessions", "4"],
+    )
+    assert r.exit_code == 0, r.output
+    ids = {sid for sid, _, _ in fake.sent}
+    assert len(ids) == 5  # main + 4 workers, each its own session (its own desk)
+    for sid in ids:
+        kinds = [k for s, k, _ in fake.sent if s == sid]
+        assert kinds[0] == "begin" and kinds[-1] == "end"

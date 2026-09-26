@@ -65,7 +65,10 @@ class PixelAgents(Visualizer):
         notes = []
         pixel_layout.drop_old_mappings(self.home)
         if pixel_layout.ensure_layout(self.home) == "written":
-            notes.append("open office layout (12 desk pods, 3 seats each; your own layout is never replaced)")
+            desks = pixel_layout.PODS_ACROSS * pixel_layout.PODS_DOWN
+            notes.append(
+                f"open office layout ({desks} spaced-out desks, one seat each; your own layout is never replaced)"
+            )
         return notes
 
     def prefer(self, labels: bool, hooks: bool) -> None:
@@ -120,8 +123,12 @@ class PixelAgents(Visualizer):
         title = str(fields.get("title") or "")
         short = str(fields.get("short") or title)[:LABEL_MAX] or "step"  # shown as "Using <short>"
         match kind:
-            case "begin":
-                return [{**base, "hook_event_name": "SessionStart", "source": "mobile-factory"}]
+            case "begin":  # the office creates the character on the event after SessionStart; a no-op tool end
+                # does that, so the session's first real step is not swallowed by the creation
+                return [
+                    {**base, "hook_event_name": "SessionStart", "source": "mobile-factory"},
+                    {**base, "hook_event_name": "PostToolUse"},
+                ]
             case "step":
                 return [
                     {

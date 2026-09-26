@@ -79,7 +79,15 @@ class Session:
 
     def step(self, title: str, short: str = "") -> None:
         """`short` is the on-screen label (≤ LABEL_MAX); defaults to the title's first word."""
-        self._send("step", title=title, short=label(short or title))
+        self.current = (title, label(short or title))
+        self._last = time.monotonic()
+        self._send("step", title=title, short=self.current[1])
+
+    def pulse(self, every: float = 5.0) -> None:
+        """Re-send the current step now and then: visualisers show a quiet session as idle."""
+        if getattr(self, "current", None) and time.monotonic() - self._last >= every:
+            self._send("step_done", title=self.current[0])
+            self.step(*self.current)
 
     def step_done(self, title: str = "") -> None:
         self._send("step_done", title=title)

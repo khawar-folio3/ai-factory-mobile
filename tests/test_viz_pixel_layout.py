@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def _base() -> dict[str, object]:
     }
 
 
-def test_open_office_is_one_room_of_spaced_three_seat_pods() -> None:
+def test_open_office_is_one_room_of_spaced_single_seat_desks() -> None:
     layout = office.open_office(_base())
     cols, rows, tiles = layout["cols"], layout["rows"], layout["tiles"]
     assert len(tiles) == len(layout["tileColors"]) == cols * rows
@@ -30,7 +31,7 @@ def test_open_office_is_one_room_of_spaced_three_seat_pods() -> None:
     kinds = [f["type"] for f in layout["furniture"]]
     pods = office.PODS_ACROSS * office.PODS_DOWN
     assert kinds.count("DESK_FRONT") == kinds.count("PC_FRONT_OFF") == pods
-    assert kinds.count("CUSHIONED_BENCH") == 3 * pods
+    assert kinds.count("CUSHIONED_BENCH") == pods
     # one room: every floor tile is inside the outer walls, with no inner wall
     floor_rows = [
         r for r in range(rows) if any(tiles[r * cols + c] not in (office.WALL, office.VOID) for c in range(cols))
@@ -38,12 +39,13 @@ def test_open_office_is_one_room_of_spaced_three_seat_pods() -> None:
     for r in floor_rows:
         row = tiles[r * cols : (r + 1) * cols]
         assert row[0] == row[-1] == office.WALL and office.WALL not in row[1:-1]
-    # every bench sits on floor, right below its desk's lower row, next to its pod-mates
-    benches = {(f["row"], f["col"]) for f in layout["furniture"] if f["type"] == "CUSHIONED_BENCH"}
+    # one bench per desk, facing its PC, and neighbouring seats far enough apart for their labels
+    benches = sorted((f["row"], f["col"]) for f in layout["furniture"] if f["type"] == "CUSHIONED_BENCH")
     desks = [(f["row"], f["col"]) for f in layout["furniture"] if f["type"] == "DESK_FRONT"]
-    for r, c in desks:
-        assert {(r + 2, c), (r + 2, c + 1), (r + 2, c + 2)} <= benches
+    assert sorted((r + 2, c + 1) for r, c in desks) == benches
     assert all(tiles[r * cols + c] not in (office.WALL, office.VOID) for r, c in benches)
+    same_row = [b for b in benches if b[0] == benches[0][0]]
+    assert min(b[1] - a[1] for a, b in itertools.pairwise(same_row)) >= 13
 
 
 def test_own_layout_is_never_replaced_but_ours_is_refreshed(monkeypatch: pytest.MonkeyPatch) -> None:

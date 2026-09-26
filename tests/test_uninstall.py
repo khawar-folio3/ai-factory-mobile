@@ -74,3 +74,14 @@ def test_uninstall_needs_confirmation_from_a_human(installed: Path, monkeypatch:
     monkeypatch.chdir(installed)
     r = runner.invoke(app, ["uninstall"])  # CliRunner is not a TTY
     assert r.exit_code != 0 and (installed / "factory.yaml").exists()
+
+
+def test_gitignore_restored_byte_for_byte(repo: Path) -> None:
+    (repo / ".gitignore").write_text("build/\n/.cursor")  # committed without a final newline
+    git(repo, "commit", "-q", "-am", "gitignore")
+    from mobile_factory.init import init as do_init
+
+    do_init(repo, force=True)
+    assert "# mobile-factory" in (repo / ".gitignore").read_text()
+    remover.apply(repo, remover.plan(repo))
+    assert (repo / ".gitignore").read_text() == "build/\n/.cursor"

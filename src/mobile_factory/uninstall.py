@@ -121,7 +121,11 @@ def apply(root: Path, rm: Removal) -> None:
     if gi.is_file():
         drop = {*GITIGNORE, "# mobile-factory"}
         kept = [ln for ln in gi.read_text().splitlines() if ln not in drop]
-        gi.write_text(re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip() + "\n")
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip() + "\n"
+        head = run(["git", "show", "HEAD:.gitignore"], root)
+        if head.ok and head.out.strip() == text.strip():
+            text = head.out  # back to the committed bytes, trailing newline or not
+        gi.write_text(text)
     ex = _exclude_file(root)
     if ex and ex.is_file():
         ex.write_text("\n".join(ln for ln in ex.read_text().splitlines() if ln not in EXCLUDE_LINES) + "\n")

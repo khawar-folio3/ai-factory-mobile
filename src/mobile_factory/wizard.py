@@ -13,6 +13,7 @@ from . import config
 from . import setup as machine
 from .config import CONFIG_NAME, LOCAL_NAME, TrackerConfig
 from .errors import FactoryError
+from .init import detect
 from .init import init as write_repo_config
 from .integrations import github
 from .integrations.tracker import JiraRest, JiraTwg, normalize_site, site_prefix
@@ -48,11 +49,23 @@ class Checks:
         return machine._port_open(machine.FIGMA_MCP_PORT)
 
     def remote_branches(self, root: Path) -> list[str]:
+        """Likely PR bases first: GitHub default branch, newest release branches, then develop/main/master."""
         r = run(
             ["git", "for-each-ref", "--sort=-committerdate", "--format=%(refname:lstrip=3)", "refs/remotes/origin"],
             root,
         )
-        return [b for b in r.out.split() if b != "HEAD"][:8]
+        refs = [b for b in r.out.split() if b != "HEAD"]
+        d = run(["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"], root)
+        default = [d.out.strip()] if d.ok and d.out.strip() else []
+        releases = [b for b in refs if re.match(r"^release/v?\d", b)][:4]
+        trunks = [b for b in ("develop", "main", "master") if b in refs]
+        return list(dict.fromkeys([*default, *releases, *trunks]))
+
+    def has_flavors(self, root: Path) -> bool:
+        files = [*root.glob("*.gradle*"), *root.glob("*/build.gradle*")]
+        return any(
+            re.search(r"productFlavors|flavorDimensions", f.read_text(errors="ignore")) for f in files if f.is_file()
+        )
 
 
 @dataclass
@@ -108,10 +121,29 @@ class Wizard:
         p = self.p
         p.say("\n== Project settings (shared, committed in factory.yaml)")
         branches = self.c.remote_branches(self.root)
-        options = [*branches, "ask on every run"]
-        base = options[p.choose("Base branch for fixes", options, 0)] if branches else p.ask("Base branch", "main")
-        answers = {"__BASE__": "ask" if base == "ask on every run" else base}
-        answers["__VARIANT__"] = p.ask("Gradle debug variant suffix (install<Variant>)", "Debug")
+        options = [*branches, "ask on every run", "other (type it)"]
+        pick = options[p.choose("Base branch PRs target", options, 0)]
+        if pick == "other (type it)":
+            pick = p.ask("Base branch", branches[0] if branches else "main")
+        answers = {"__BASE__": "ask" if pick == "ask on every run" else pick}
+
+        detected = detect(self.root)
+        answers["__APP_MODULE__"] = p.ask("App module (the one that builds the APK)", detected["__APP_MODULE__"])
+        if self.c.has_flavors(self.root):
+            p.say("  this app has product flavors: the variant is <flavors><BuildType>, e.g. stageAcmeDebug")
+            p.say("  (Android Studio → Build Variants panel shows the exact name)")
+            variant = ""
+            while not variant:
+                variant = p.ask("Debug variant to build and install")
+        else:
+            variant = p.ask("Debug variant to build and install", "Debug")
+        answers["__VARIANT__"] = variant[:1].upper() + variant[1:]
+        answers["__APP_ID__"] = p.ask(
+            "Application id of that build on the device (e.g. com.acme.app.debug)", detected["__APP_ID__"]
+        )
+        answers["__LAUNCHER__"] = p.ask(
+            "Launcher activity, fully qualified (empty = the app's default launcher)", detected["__LAUNCHER__"]
+        )
 
         kind = p.choose("Where do tickets live?", ["Jira", "Markdown files in .factory/tickets (no Jira)"], 0)
         if kind == 0:

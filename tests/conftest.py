@@ -8,7 +8,6 @@ import pytest
 
 from mobile_factory import adapters, config
 from mobile_factory.platforms.base import Check, CheckRun, Platform
-from mobile_factory.viz.pixel import PixelAgents
 
 
 @pytest.fixture(autouse=True)
@@ -18,7 +17,6 @@ def factory_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.M
     monkeypatch.setenv("FACTORY_HOME", str(home))
     monkeypatch.setenv("FACTORY_AGENT_HOME", str(tmp_path_factory.mktemp("agent-home")))
     monkeypatch.setattr(adapters, "_register_claude_mcp", lambda root, servers: sorted(servers))  # no ~/.claude.json
-    monkeypatch.setattr(PixelAgents, "home", tmp_path_factory.mktemp("pixel-home"))  # no ~/.pixel-agents
     return home
 
 

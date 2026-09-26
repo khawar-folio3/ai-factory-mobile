@@ -99,10 +99,15 @@ class Session:
         self._send("idle")
 
     def subagent(self, name: str) -> None:
-        self._send("subagent", title=label(name))
+        self._subs = getattr(self, "_subs", 0) + 1
+        self._open = [*getattr(self, "_open", []), self._subs]
+        self._send("subagent", title=label(name), n=self._subs)
 
     def subagent_done(self) -> None:
-        self._send("subagent_done")
+        """Closes the oldest subagent still open."""
+        open_ = getattr(self, "_open", [])
+        if open_:
+            self._send("subagent_done", n=open_.pop(0))
 
     def end(self, outcome: str = "done") -> None:
         self._send("end", outcome=outcome)

@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from mobile_factory import events, viz
 from mobile_factory.cli import app
 from mobile_factory.config import VizConfig
-from mobile_factory.viz.pixel import PixelAgents
+from mobile_factory.viz.claude_office import ClaudeOffice
 
 runner = CliRunner()
 
@@ -39,7 +39,7 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> type[FakeViz]:
 def test_make_picks_the_backend_or_a_silent_one() -> None:
     assert isinstance(viz.make(VizConfig()), viz.NullVisualizer)  # off
     assert isinstance(viz.make(VizConfig(pixel_agents=True, tool="nope")), viz.NullVisualizer)  # unknown
-    assert isinstance(viz.make(VizConfig(pixel_agents=True)), PixelAgents)
+    assert isinstance(viz.make(VizConfig(pixel_agents=True)), ClaudeOffice)
 
 
 def test_a_broken_backend_never_breaks_the_work(tmp_path: Path) -> None:
@@ -75,48 +75,40 @@ def test_factory_run_events_become_one_session(fake: type[FakeViz], tmp_path: Pa
     assert fake.sent[1][2]["title"] == "Fix" and fake.sent[-1][2]["outcome"] == "draft-pr"
 
 
-def test_pixel_payloads(tmp_path: Path) -> None:
-    p = PixelAgents.payloads
-    start = p(tmp_path, "r1", "step", title="Reading review comments", short="comments")[0]
-    assert start["hook_event_name"] == "PreToolUse" and start["tool_name"] == "comments"  # "Using comments"
-    assert start["session_id"] == "factory-r1" and start["cwd"] == str(tmp_path)
-    helper = p(tmp_path, "r1", "subagent", title="tally 1")[0]
-    assert helper["tool_name"] == "Agent" and helper["tool_input"]["description"] == "tally 1"  # "Subtask: tally 1"
-    assert p(tmp_path, "r1", "waiting")[0]["notification_type"] == "permission_prompt"
-    assert [x["hook_event_name"] for x in p(tmp_path, "r1", "end", outcome="done")] == ["Stop", "SessionEnd"]
-    assert [x["hook_event_name"] for x in p(tmp_path, "r1", "begin")] == ["SessionStart", "PostToolUse"]
+def test_claude_office_payloads(tmp_path: Path) -> None:
+    p = ClaudeOffice.payloads
+    (start,) = p(tmp_path, "r1", "begin")
+    assert start["event_type"] == "session_start" and start["session_id"] == "factory-r1"
+    assert start["data"]["project_name"] == tmp_path.name
+    step = p(tmp_path, "r1", "step", title="Reading review comments", short="comments")[0]
+    assert step["event_type"] == "pre_tool_use" and step["data"]["tool_name"] == "comments"
+    sub = p(tmp_path, "r1", "subagent", title="tally 1", n=1)[0]
+    assert sub["event_type"] == "subagent_start" and sub["data"]["agent_id"] == "r1-sub-1"
+    assert p(tmp_path, "r1", "subagent_done", n=1)[0]["data"]["agent_id"] == "r1-sub-1"
+    assert [x["event_type"] for x in p(tmp_path, "r1", "end")] == ["stop", "session_end"]
 
 
-def test_pixel_without_servers_is_silent(tmp_path: Path) -> None:
-    PixelAgents().send(tmp_path, "r1", "begin")
-    assert PixelAgents().offices() == []
-
-
-def test_pixel_live_hooks_detection(tmp_path: Path) -> None:
-    px = PixelAgents()
-    assert not px.live_hooks(tmp_path)
-    (tmp_path / "settings.json").write_text(json.dumps({"hooks": {}}))
-    assert not px.live_hooks(tmp_path)
-    hook = {"PreToolUse": [{"hooks": [{"type": "command", "command": "node ~/.pixel-agents/hooks/claude-hook.js"}]}]}
+def test_claude_office_live_hooks_detection(tmp_path: Path) -> None:
+    co = ClaudeOffice()
+    assert not co.live_hooks(tmp_path)
+    hook = {"PreToolUse": [{"hooks": [{"type": "command", "command": "claude-office-hook pre_tool_use"}]}]}
     (tmp_path / "settings.json").write_text(json.dumps({"hooks": hook}))
-    assert px.live_hooks(tmp_path)
+    assert co.live_hooks(tmp_path)
 
 
-def test_pixel_url_carries_the_token_that_allows_hooks() -> None:
-    assert PixelAgents.url({"port": 62037, "token": "abc"}) == "http://127.0.0.1:62037/?token=abc"
-    assert PixelAgents.url({"port": 62037}) == "http://127.0.0.1:62037/"
-
-
-def test_pixel_prefers_labels_and_grants_hook_consent() -> None:
-    f = PixelAgents.home / "config.json"
-    f.write_text(json.dumps({"standalone": {"soundEnabled": True}, "hooksConsent": {}, "hooksEnabled": {}}))
-    PixelAgents().prefer(labels=True, hooks=True)
-    cfg = json.loads(f.read_text())
-    assert cfg["standalone"] == {"soundEnabled": True, "alwaysShowLabels": True}  # other settings kept
-    assert cfg["hooksConsent"] == {"claude": "granted"} and cfg["hooksEnabled"] == {"claude": True}
-    f.write_text(json.dumps({"hooksConsent": {}}))
-    PixelAgents().prefer(labels=True, hooks=False)
-    assert json.loads(f.read_text())["hooksConsent"] == {}  # no consent unless the developer wants hooks
+def test_subagents_close_in_the_order_they_opened(fake: type[FakeViz], tmp_path: Path) -> None:
+    s = viz.Session(FakeViz(), tmp_path, "x")
+    s.subagent("a")
+    s.subagent("b")
+    s.subagent_done()
+    s.subagent_done()
+    s.subagent_done()  # nothing open: ignored
+    assert [(k, f.get("n")) for _, k, f in fake.sent] == [
+        ("subagent", 1),
+        ("subagent", 2),
+        ("subagent_done", 1),
+        ("subagent_done", 2),
+    ]
 
 
 def test_viz_demo_runs_without_a_factory_setup(

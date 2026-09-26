@@ -225,15 +225,15 @@ def test_run_watched_drives_progress_from_files(tmp_path: Path, capsys: pytest.C
     assert code == 0 and lines[0] == "  Tallying review chunks…" and "✓ Writing taste rules" in lines[-1]
 
 
-def test_pixel_office_opt_in_is_saved_per_developer(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_office_opt_in_is_saved_per_developer(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import yaml
 
     from mobile_factory import cli, config
 
     lc = config.load(repo)
-    lc.path(lc.cfg.guardrail.taste).write_text("rules\n")  # taste done: only the pixel question is left
+    lc.path(lc.cfg.guardrail.taste).write_text("rules\n")  # taste done: only the office question is left
     monkeypatch.setattr(cli, "has", lambda tool: True)
-    monkeypatch.setattr(cli, "_yes", lambda question, default: "Pixel Agents" in question or "live hooks" in question)
+    monkeypatch.setattr(cli, "_yes", lambda question, default: "office" in question or "live hooks" in question)
     started: list[Path] = []
     monkeypatch.setattr(cli, "_start_office", started.append)
     monkeypatch.setattr(cli, "_choose", lambda q, options, default: 0)  # keep the taste rules

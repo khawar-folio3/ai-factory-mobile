@@ -143,7 +143,7 @@ def test_broken_claude_link_is_explained(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_optional_extras_never_block_machine_ready() -> None:
-    p = machine.Plan([machine.Step("pixel-agents", "install", "npm i -g pixel-agents", soft=True)])
+    p = machine.Plan([machine.Step("claude-office", "install", "git clone …", soft=True)])
     assert machine.execute(p, lambda s: True, echo=lambda m: None, installer=lambda s: 1)
     p = machine.Plan([machine.Step("claude", "install", "curl claude")])
     assert not machine.execute(p, lambda s: True, echo=lambda m: None, installer=lambda s: 1)
@@ -158,16 +158,14 @@ def test_outdated_reads_brew_and_npm(monkeypatch: pytest.MonkeyPatch) -> None:
         "formulae": [{"name": "gh", "installed_versions": ["2.60.0"], "current_version": "2.62.0"}],
         "casks": [{"name": "android-platform-tools", "installed_versions": ["35.0.1"], "current_version": "36.0.0"}],
     }
-    npm = {"pixel-agents": {"current": "1.2.0", "latest": "1.4.0"}}
     monkeypatch.setattr(machine, "has", lambda tool: True)
     monkeypatch.setattr(
         machine,
         "run",
-        lambda cmd, **_: Result(0 if cmd[0] == "brew" else 1, json.dumps(brew if cmd[0] == "brew" else npm), ""),
+        lambda cmd, **_: Result(0 if cmd[0] == "brew" else 1, json.dumps(brew), ""),
     )
-    tools = [machine.Tool(n, "", lambda: True) for n in ("gh", "adb", "git", "pixel-agents")]
+    tools = [machine.Tool(n, "", lambda: True) for n in ("gh", "adb", "git")]
     ups = {u.tool: u for u in machine.outdated(tools)}
-    assert set(ups) == {"gh", "adb", "pixel-agents"}  # git is current
+    assert set(ups) == {"gh", "adb"}  # git is current
     assert ups["gh"].command == "brew upgrade gh" and ups["gh"].latest == "2.62.0"
     assert ups["adb"].command == "brew upgrade --cask android-platform-tools"
-    assert ups["pixel-agents"].command == "npm install --global pixel-agents@latest"

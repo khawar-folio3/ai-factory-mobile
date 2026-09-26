@@ -351,9 +351,9 @@ def _setup(yes: bool, optional: bool) -> bool:
     try:
         loaded = config.load().cfg
         cfg, figma, agents = loaded.setup, config.figma_mode(loaded), list(loaded.agents.use)
-        pixel = loaded.viz.pixel_agents
+        pixel = loaded.viz.tool if loaded.viz.pixel_agents else ""
     except FactoryError:
-        cfg, figma, agents, pixel = None, "desktop", None, False
+        cfg, figma, agents, pixel = None, "desktop", None, ""
     p = machine.plan(machine.tools(cfg, figma, agents, pixel), optional=optional)
     typer.echo(_render_plan(p))
     if not p.todo:
@@ -617,9 +617,7 @@ def _distill(lc: config.LoadedConfig, refresh: bool = False) -> bool:
     return False
 
 
-OFFICE_HINT = (
-    "start it in this repo and keep it running: `pixel-agents` (opens your browser), or VS Code → Pixel Agents"
-)
+OFFICE_HINT = "`factory viz start`"
 
 
 OFFICE_HOOKS_HINT = (
@@ -695,21 +693,24 @@ def _optional_extras(root: Path) -> None:
         _say("  ok  Pixel office off  (turn it on: `viz: {pixel_agents: true}` in your local.yaml)", hints=True)
     elif not pixel:
         _say(
-            "    Pixel Agents shows agents as pixel-art characters in an office: your Claude Code session and its\n"
-            "    subagents natively, plus a character per factory run (steps as tools, gates as permission bubbles)",
+            "    Claude Office shows every agent as a character at its own desk: your Claude Code sessions,\n"
+            "    their subagents, and each factory run and its steps. Runs locally, no account needed",
             hints=True,
         )
-        if _yes("Watch long-running work in the Pixel Agents office?", False):
+        if _yes("Watch long-running work in the office?", False):
             _say(
-                "    live hooks let the office see your Claude Code sessions as they work"
-                " (Pixel Agents adds its hook to ~/.claude/settings.json; undo in its Settings)",
+                "    live hooks let the office see your Claude Code sessions and subagents as they work"
+                " (adds its hook to ~/.claude/settings.json)",
                 hints=True,
             )
             hooks = _yes("Turn on live hooks?", True)
             write_local(lc.root, {"viz": {"pixel_agents": True, "pixel_hooks": hooks}})
             pixel = True
-            tools = machine.tools(lc.cfg.setup, config.figma_mode(lc.cfg), [], pixel=True)
-            extra = machine.plan([t for t in tools if t.name in ("node", "pixel-agents")])
+            tool = config.load(lc.root).cfg.viz.tool
+            wanted = machine.VIZ_NEEDS.get(tool, ())
+            extra = machine.plan(
+                [t for t in machine.tools(lc.cfg.setup, config.figma_mode(lc.cfg), [], tool) if t.name in wanted]
+            )
             if extra.todo:
                 typer.echo(_render_plan(extra))
                 machine.execute(extra, lambda _s: True, echo=lambda t: _say(t, hints=True), installer=_install_quietly)
@@ -870,7 +871,9 @@ def doctor_cmd(offline: bool = typer.Option(False, help="Skip network checks."))
     _say(text)
     if not offline and sys.stdin.isatty() and sys.stdout.isatty():
         c = lc.cfg
-        _offer_upgrades(machine.tools(c.setup, config.figma_mode(c), list(c.agents.use), c.viz.pixel_agents))
+        _offer_upgrades(
+            machine.tools(c.setup, config.figma_mode(c), list(c.agents.use), c.viz.tool if c.viz.pixel_agents else "")
+        )
     raise typer.Exit(0 if ok else 1)
 
 
@@ -1042,7 +1045,7 @@ def abort(
 
 @app.command(name="events")
 def events_cmd(run: RunOpt = None, follow: bool = typer.Option(False, "--follow", "-f")) -> None:
-    """Print the event stream (JSONL): the source for metrics, Slack and the pixel office."""
+    """Print the event stream (JSONL): the source for metrics, Slack and the office."""
     log = _lc().state_dir / "events.jsonl"
     seen = 0
     while True:
@@ -1245,7 +1248,7 @@ def main() -> None:
 
 # ---------- visualiser (works without a factory run, and without factory.yaml) ----------
 
-ToolOpt = Annotated[str, typer.Option("--tool", help="Visualiser backend (default: this repo's, else pixel-agents).")]
+ToolOpt = Annotated[str, typer.Option("--tool", help="Visualiser backend (default: this repo's, else claude-office).")]
 
 
 def _viz_here(tool: str) -> tuple[Path, VizConfig]:

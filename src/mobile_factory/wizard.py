@@ -437,7 +437,7 @@ class Wizard:
             ("Taste rules", f"{rules} rules" if rules else "none yet"),
             ("Slack", "on" if c.notifications.slack_webhook else "off"),
             (
-                "Pixel office",
+                "Office",
                 ("on · live hooks " + ("on" if c.viz.pixel_hooks else "off")) if c.viz.pixel_agents else "off",
             ),
             ("Stored in", str(lc.state_dir).replace(str(Path.home()), "~")),

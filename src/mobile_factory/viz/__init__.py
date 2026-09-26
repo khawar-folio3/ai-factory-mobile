@@ -10,12 +10,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .base import Kind, NullVisualizer, Office, Session, Visualizer, event_sink
-from .pixel import PixelAgents
+from .claude_office import ClaudeOffice
 
 if TYPE_CHECKING:
     from ..config import VizConfig
 
-BACKENDS: dict[str, type[Visualizer]] = {PixelAgents.name: PixelAgents}
+BACKENDS: dict[str, type[Visualizer]] = {ClaudeOffice.name: ClaudeOffice}
 
 
 def make(prefs: VizConfig | None) -> Visualizer:

@@ -93,6 +93,16 @@ def _claude_install() -> str:
     return f"rm -f '{link}' && {CLAUDE_INSTALL}" if link else CLAUDE_INSTALL
 
 
+CLAUDE_OFFICE = Path.home() / ".config" / "mobile-factory" / "tools" / "claude-office"
+# tools each visualiser needs, in install order
+VIZ_NEEDS = {"claude-office": ("uv", "node", "claude-office")}
+VIZ_TOOLS = {name: needs for name, needs in VIZ_NEEDS.items()} | {"uv": (), "node": ()}
+
+
+def _needed_by(viz: str) -> tuple[str, ...]:
+    return VIZ_NEEDS.get(viz, ())
+
+
 def _node_20() -> bool:
     m = re.match(r"v(\d+)", run(["node", "-v"]).out.strip()) if has("node") else None
     return m is not None and int(m.group(1)) >= 20
@@ -102,8 +112,9 @@ def tools(
     cfg: SetupConfig | None = None,
     figma: str = "desktop",
     agents: Sequence[str] | None = None,
-    pixel: bool = False,
+    viz: str = "",
 ) -> list[Tool]:
+    """`viz`: the visualiser the developer turned on ("" = none); its own tools are added as soft extras."""
     mac = platform.system() == "Darwin"
 
     def cask(name: str) -> str:
@@ -176,18 +187,22 @@ def tools(
             group="Design",
         ),
         Tool(
-            "node",
-            "Node.js 20+ for Pixel Agents",
-            _node_20,
-            "brew install node" if mac else "",
+            "uv", "Python tooling for Claude Office", lambda: has("uv"), "brew install uv", group="Optional", soft=True
+        ),
+        Tool(
+            "claude-office",
+            "office where every agent and subagent gets its own desk",
+            (CLAUDE_OFFICE / "backend" / "static").is_dir,
+            f"rm -rf '{CLAUDE_OFFICE}' && git clone --depth 1 https://github.com/paulrobello/claude-office '{CLAUDE_OFFICE}'"
+            f" && cd '{CLAUDE_OFFICE}/backend' && uv sync && cd ../frontend && npm install && cd .. && make build-static",
             group="Optional",
             soft=True,
         ),
         Tool(
-            "pixel-agents",
-            "pixel office for factory runs and Claude Code agents",
-            lambda: has("pixel-agents"),
-            "npm install --global pixel-agents",
+            "node",
+            "Node.js 20+ for the visualiser",
+            _node_20,
+            "brew install node" if mac else "",
             group="Optional",
             soft=True,
         ),
@@ -207,7 +222,7 @@ def tools(
     for t in listed:
         if t.name in wanted.values() and t.name not in chosen:
             continue
-        if t.name in ("node", "pixel-agents") and not pixel:
+        if t.name in VIZ_TOOLS and t.name not in VIZ_TOOLS.get(viz, ()) and t.name not in _needed_by(viz):
             continue
         if t.name == "figma" and figma != "desktop":
             continue  # remote server or no Figma: the desktop app is not needed
@@ -271,7 +286,7 @@ class Upgrade:
 
 
 def outdated(tool_list: list[Tool]) -> list[Upgrade]:
-    """Newer versions of installed tools, from Homebrew's local index and npm; auto-updating CLIs are not listed."""
+    """Newer versions of installed tools, from Homebrew's local index; auto-updating CLIs are not listed."""
     names = {t.name for t in tool_list if t.present()}
     ups: list[Upgrade] = []
     if has("brew"):
@@ -283,11 +298,6 @@ def outdated(tool_list: list[Tool]) -> list[Upgrade]:
                 current = ", ".join(e.get("installed_versions") or [])
                 flag = "--cask " if cask else ""
                 ups.append(Upgrade(tool, current, str(e.get("current_version", "")), f"brew upgrade {flag}{name}"))
-    if "pixel-agents" in names and has("npm"):
-        r = run(["npm", "outdated", "--global", "--json", "pixel-agents"])  # exits 1 when something is outdated
-        e = (json.loads(r.out) if r.out.strip() else {}).get("pixel-agents")
-        if e and e.get("current") != e.get("latest"):
-            ups.append(Upgrade("pixel-agents", e["current"], e["latest"], "npm install --global pixel-agents@latest"))
     return ups
 
 

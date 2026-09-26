@@ -188,7 +188,7 @@ class NotificationsConfig(_Model):
 
 class VizConfig(_Model):
     pixel_agents: bool = False  # watch factory work in a visualiser (historical name: it switches any `tool` on)
-    tool: str = "pixel-agents"  # which visualiser (mobile_factory.viz.BACKENDS)
+    tool: str = "claude-office"  # which visualiser (mobile_factory.viz.BACKENDS)
     pixel_hooks: bool = True  # let the office see Claude Code sessions live (Pixel Agents' own hook)
     pixel_labels: bool = True  # always show agent labels in the office
 

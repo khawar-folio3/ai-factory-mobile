@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -13,7 +14,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from . import autonomy, events, viz
+from . import autonomy, events, usage, viz
 from .config import LoadedConfig
 from .errors import FactoryError, Refused, Stop
 from .gitops import Git
@@ -303,6 +304,8 @@ class Engine:
         self.st.status = status
         self.st.outcome = outcome
         self.st.stop_reason = reason
+        with contextlib.suppress(Exception):  # token count is bookkeeping: it never fails a run
+            self.st.outputs["_usage"] = usage.for_run(self.st, self.lc.root).as_dict()
         self.bus.emit(
             events.RUN_FINISHED,
             self.st.id,

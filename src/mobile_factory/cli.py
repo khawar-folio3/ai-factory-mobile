@@ -16,7 +16,7 @@ from typing import Annotated, Any
 
 import typer
 
-from . import __version__, adapters, config, doctor, events, metrics, viz
+from . import __version__, adapters, config, doctor, events, metrics, usage, viz
 from . import setup as machine
 from . import uninstall as remover
 from .config import VizConfig
@@ -978,6 +978,26 @@ def status(run: RunOpt = None, all_runs: bool = typer.Option(False, "--all", hel
     _say(eng.progress())
     if eng.st.stop_reason:
         _say(f"stop: {eng.st.stop_reason}")
+    _say(usage.render(_record_usage(eng)), hints=True)
+
+
+def _record_usage(eng: Engine) -> usage.Usage:
+    """Tokens so far for this run, saved on the run so metrics can total them per ticket."""
+    u = usage.for_run(eng.st, eng.lc.root)
+    eng.st.outputs["_usage"] = u.as_dict()
+    eng.store.save(eng.st)
+    return u
+
+
+@app.command()
+def tokens(run: RunOpt = None, all_runs: bool = typer.Option(False, "--all", help="Every run, per ticket.")) -> None:
+    """Tokens used per ticket: every model call of the Claude Code sessions (and subagents) that drove the run."""
+    lc = _lc()
+    runs = RunStore(lc.runs_dir).all() if all_runs else [Engine.load(lc, run).st]
+    for st in runs:
+        u = _record_usage(Engine(lc, st))
+        _say(f"\n== {st.ticket}  ({st.id} · {st.status})", hints=True)
+        _say(usage.render(u), hints=True)
 
 
 @app.command()

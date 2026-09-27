@@ -25,7 +25,13 @@ def summarize(runs: list[RunState], since: str = "") -> dict[str, Any]:
         "gates_rejected": sum(1 for g in gates if g.decision == "rejected"),
         "levels": dict(Counter(f"L{r.level}" for r in runs if r.risk).most_common()),
         "median_risk": median(r.risk.score for r in runs if r.risk) if any(r.risk for r in runs) else None,
+        "median_tokens_per_ticket": median(t) if (t := _tokens(finished)) else None,
+        "tokens_total": sum(_tokens(runs)),
     }
+
+
+def _tokens(runs: list[RunState]) -> list[int]:
+    return [int(r.outputs["_usage"]["total"]) for r in runs if r.outputs.get("_usage", {}).get("total")]
 
 
 def render(m: dict[str, Any]) -> str:
@@ -35,5 +41,7 @@ def render(m: dict[str, Any]) -> str:
         f"gates: auto {auto} · human {m['gates_human']} (rejected {m['gates_rejected']}) · median fix attempts {m['median_fix_attempts']}",
         f"autonomy levels {m['levels']} · median risk {m['median_risk']}",
         "outcomes: " + ", ".join(f"{k} {v}" for k, v in m["outcomes"].items()),
+        f"tokens: {m['tokens_total']:,} total · median per ticket {m['median_tokens_per_ticket'] or '-'}"
+        " (`factory tokens --all` per ticket)",
     ]
     return "\n".join(lines)

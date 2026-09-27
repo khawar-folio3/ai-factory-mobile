@@ -34,3 +34,6 @@ and rule; keep the highest severity), then apply the rules below. If your tool h
 Look for what the owner would reject: scope creep, unrelated edits, a second way of doing something the codebase already
 does one way, needless abstractions, defensive null checks the types already rule out, missing test for testable logic,
 naming that breaks the local convention, logs that leak data.
+
+When a HINT names `context/review-scout.md`, read it first: searches, history and command output are
+already there. Run your own searches only for what it lists under `Not found:` or clearly lacks.

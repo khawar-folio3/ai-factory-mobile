@@ -10,7 +10,8 @@ Read only your lines, projected lean:
 ```sh
 sed -n '<a>,<b>p' <data>/reviews.jsonl | jq -c '{pr, state, path, resolution, body: (.body[:400]), hunk: (.diff_hunk | split("\n") | .[-4:] | join("\n"))}'
 ```
-Apply steps 2-3 of the guardrail-learn skill (drop noise, weigh the resolution). Write:
+Apply steps 2-3 of the guardrail-learn skill (drop noise, weigh the resolution). Write your output file with the
+Write tool (never `cat >`/heredocs: headless runs refuse unlisted shell commands):
 ```json
 {"chunk": 1, "candidates": [
   {"preference": "prefer sealed UI state over nullable flags", "paths": ["feature/x/ui/FooViewModel.kt"],

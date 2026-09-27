@@ -124,17 +124,20 @@ def test_matches_ignores_blank_globs() -> None:
     assert not matches("a.kt", ["", "  "])
 
 
-def test_reviews_split_into_parallel_chunks(tmp_path: Path) -> None:
+def test_reviews_split_into_as_many_parallel_chunks_as_allowed(tmp_path: Path) -> None:
     from mobile_factory.guardrail import harvest
 
     data = tmp_path / ".factory/data"
     data.mkdir(parents=True)
     (data / "reviews.jsonl").write_text("{}\n" * 1000)
-    assert harvest.chunks(data) == [(i, i + 124) for i in range(1, 1001, 125)]  # 8 subagents
-    (data / "reviews.jsonl").write_text("{}\n" * 150)
-    assert harvest.chunks(data) == [(1, 100), (101, 150)]  # never below 100 lines each
+    assert len(harvest.chunks(data)) == 16  # capped by max_parallel
+    assert len(harvest.chunks(data, parallel=40)) == 40  # 25 per chunk: the work allows 40
+    assert len(harvest.chunks(data, parallel=100)) == 40  # never below MIN_CHUNK comments each
+    (data / "reviews.jsonl").write_text("{}\n" * 30)
+    assert harvest.chunks(data) == [(1, 25), (26, 30)]
+    assert harvest.chunks(data, parallel=1) == [(1, 30)]
     plan = harvest.parallel_plan(data)
-    assert f"factory-learn-tally  lines 101-150  ->  {data}/tally-2.json  (description: tally 2)" in plan
+    assert f"factory-learn-tally  lines 26-30  ->  {data}/tally-2.json  (description: tally 2)" in plan
 
 
 def test_harvest_skips_processed_prs_and_full_starts_over(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

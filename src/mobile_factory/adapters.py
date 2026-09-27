@@ -98,7 +98,15 @@ READ_ONLY = (
     "\nRead-only: never edit, create or delete source files; write only your output file."
     " Other agents run at the same time.\n"
 )
-READ_ONLY_PARTS = ("review-correctness", "review-taste", "review-detectors", "locate", "learn-tally")
+READ_ONLY_PARTS = (
+    "review-correctness",
+    "review-taste",
+    "review-detectors",
+    "locate",
+    "learn-tally",
+    "scout",
+    "history",
+)
 
 
 def subagent_text(name: str, model: str) -> str:

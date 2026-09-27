@@ -140,33 +140,29 @@ def test_launcher_found_in_custom_source_set_ignoring_comments(tmp_path: Path) -
     assert _launcher(tmp_path) == "com.acme.splash.Launch"
 
 
-def test_distill_runs_one_session_per_chunk_then_a_merge(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_distill_runs_one_session_that_fans_out_tally_subagents(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from mobile_factory import cli, config
 
     lc = config.load(repo)
     data = lc.state_dir / "data"
     data.mkdir(parents=True, exist_ok=True)
-    (data / "reviews.jsonl").write_text("".join(f'{{"id": {n}, "pr": {n}}}\n' for n in range(250)))  # 3 chunks
+    (data / "reviews.jsonl").write_text("".join(f'{{"id": {n}, "pr": {n}}}\n' for n in range(250)))
     batches: list[list[list[str]]] = []
 
     def fake_run(cmds: list[list[str]], cwd: Path, logs: list[Path], stage: object, **_: object) -> int:
         batches.append(cmds)
-        if len(batches) == 1:  # the tally sessions each write their file
-            for n in range(1, len(cmds) + 1):
-                (data / f"tally-{n}.json").write_text("{}")
-        else:
-            lc.path(lc.cfg.guardrail.taste).write_text("### R001 · rule [nit]\n")
+        lc.path(lc.cfg.guardrail.taste).write_text("### R001 · rule [nit]\n")
         return 0
 
     monkeypatch.setattr(cli, "has", lambda tool: tool == "claude")
     monkeypatch.setattr(cli, "_run_watched", fake_run)
     assert cli._distill(lc)
-    tallies, (merge,) = batches
-    assert len(tallies) == 3  # separate sessions: each gets its own desk in the office
-    assert all(c[:2] == ["claude", "-p"] and "--agents" not in c for c in [*tallies, merge])
-    assert "Tally lines 1-100" in tallies[0][2] and tallies[0][tallies[0].index("--model") + 1] == "sonnet"
-    assert "steps 1-3 are done" in merge[2] and "Guardrail learn" in merge[2]
-    assert "Agent" not in merge[merge.index("--allowedTools") + 1]  # no subagents any more
+    ((cmd,),) = batches  # one session
+    assert cmd[:2] == ["claude", "-p"] and "Guardrail learn" in cmd[2]
+    assert cmd[2].count("factory-learn-tally  lines") == 10  # 250 comments / 25 per chunk, all at once
+    assert "Agent" in cmd[cmd.index("--allowedTools") + 1]
+    agents = json.loads(Path(cmd[cmd.index("--agents") + 1]).read_text())
+    assert agents["factory-learn-tally"]["model"] == "sonnet"
 
 
 def test_distill_without_agent_cli_says_so(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:

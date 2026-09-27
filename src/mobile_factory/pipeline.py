@@ -80,7 +80,12 @@ AGENT_TASKS = {
 # Independent read-only sub-tasks of a step: started together, then the step's own agent merges them.
 PARALLEL = {"review": ["review-correctness", "review-taste", "review-detectors"]}
 # Read-only helpers started together with the step's own agent; their file feeds a later step.
-ALONGSIDE = {"reproduce": ["locate"]}
+ALONGSIDE = {
+    "reproduce": ["locate", "history"],  # code map and the code's past while the device is busy
+    "verify": PARALLEL["review"],  # reviewers read the diff while QA uses the device
+}
+# Steps whose searches and command output a Haiku scout gathers first (subagents cannot start subagents).
+SCOUTED = {"triage", "fix", "verify", "review"}
 
 
 def _slug(text: str) -> str:
@@ -353,7 +358,11 @@ class Engine:
         models = self.cfg.agents.models
         parts = PARALLEL.get(step, [])
         lines = []
-        if parts:
+        done = self._parts_done(parts)
+        if parts and done:
+            lines.append("PARTS    already done alongside verify, for this exact diff: " + ", ".join(map(str, done)))
+            lines.append(f"THEN     factory-{step} merges those files, dedupes, applies fixes and writes the output")
+        elif parts:
             out = self.dir / "context"
             how = "start ALL of these in one message (parallel)" if self.cfg.agents.parallel else "run these in turn"
             lines.append(f"PARALLEL {how}; each writes findings JSON (schema: factory schema review), read-only:")
@@ -372,9 +381,31 @@ class Engine:
                 f"ALONGSIDE start `factory-{helper}` ({models.get(helper, 'inherit')}) in the SAME message, read-only  "
                 f"->  {self.dir / 'context' / f'{helper}.json'}  (description: {helper})"
             )
-        if step == "fix" and (hint := self.dir / "context" / "locate.json").is_file():
-            lines.append(f"HINT     {hint}  (code map from locate: start there, confirm before editing)")
+        if step in SCOUTED:
+            scout = self.dir / "context" / f"{step}-scout.md"
+            if scout.is_file():
+                lines.append(f"HINT     {scout}  (scout findings: start there, search again only for what it lacks)")
+            else:
+                lines.insert(
+                    0,
+                    f"SCOUT    first start `factory-scout` ({models.get('scout', 'haiku')}) with what `{step}` needs to "
+                    f"know (greps, git history, gradle/adb output)  ->  {scout}  (description: scout {step}); "
+                    "then delegate the step",
+                )
+        if step == "fix":
+            for name, what in (("locate", "code map"), ("history", "the code's past: regressions, earlier fixes")):
+                if (hint := self.dir / "context" / f"{name}.json").is_file():
+                    lines.append(f"HINT     {hint}  ({what}: start there, confirm before editing)")
         return lines
+
+    def _parts_done(self, parts: list[str]) -> list[Path]:
+        """Review part files written for the current diff (newer than diff.patch); else [] and they run again."""
+        ctx = self.dir / "context"
+        files = [ctx / f"{p}.json" for p in parts]
+        diff = ctx / "diff.patch"
+        if not parts or not diff.is_file() or not all(f.is_file() for f in files):
+            return []
+        return files if all(f.stat().st_mtime >= diff.stat().st_mtime for f in files) else []
 
     def progress(self) -> str:
         names = [n.name for n in self.nodes]
@@ -483,7 +514,23 @@ def _checks(e: Engine) -> dict[str, Any]:
     build = e.platform.build_install(logs)
     if not build.ok:
         raise Retry(f"build failed ({build.log}):\n{build.summary}")
+    _prepare_review(e)  # reviewers can start alongside verify
     return {"checks": res.summary, "build": build.summary.splitlines()[0]}
+
+
+def _prepare_review(e: Engine) -> None:
+    """The guardrail context for the current diff: built after checks so reviewers can start alongside verify.
+    An unchanged diff is left alone, so the part files written for it (newer than diff.patch) stay valid."""
+    patch = e.git.diff(e.st.checkpoint)
+    sha = hashlib.sha256(patch.encode()).hexdigest()
+    if e.out("_review_ctx").get("patch_sha") == sha and (e.dir / "context" / "diff.patch").is_file():
+        return
+    ctx = review_ctx.build(e.lc, patch, e.dir / "context")
+    e.st.outputs["_review_ctx"] = {
+        "summary": ctx.summary(),
+        "detector": [f.model_dump() for f in ctx.detector_findings],
+        "patch_sha": sha,
+    }
 
 
 def _commit(e: Engine) -> dict[str, Any]:
@@ -493,13 +540,7 @@ def _commit(e: Engine) -> dict[str, Any]:
     sha = e.git.commit(files, subject, amend=amend)
     e.st.signals.actual_files, e.st.signals.lines_changed = len(files), e.git.numstat(e.st.checkpoint)
     e.reassess()  # guardrail rounds can grow the diff
-    # prepare the guardrail context now so the review agent starts from it
-    patch = e.git.diff(e.st.checkpoint)
-    ctx = review_ctx.build(e.lc, patch, e.dir / "context")
-    e.st.outputs["_review_ctx"] = {
-        "summary": ctx.summary(),
-        "detector": [f.model_dump() for f in ctx.detector_findings],
-    }
+    _prepare_review(e)  # usually unchanged since checks: the parts done alongside verify still count
     return {"sha": sha, "subject": subject, "amended": amend, "files": files}
 
 

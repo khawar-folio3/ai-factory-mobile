@@ -16,3 +16,6 @@ Output: `factory schema fix`. Do not commit; the runner commits after verificati
 
 `summary` is the commit subject without the ticket key: imperative, ≤ 72 chars ("Wrap avatar height on profile header").
 `changes`: what changed, file by file, and why this is the smallest fix.
+
+When a HINT names `context/fix-scout.md`, read it first: searches, history and command output are
+already there. Run your own searches only for what it lists under `Not found:` or clearly lacks.

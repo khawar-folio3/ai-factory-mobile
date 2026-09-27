@@ -31,6 +31,8 @@ def to_fix(eng: Engine, fake: FakePlatform) -> None:
     eng.submit("triage", TRIAGE)
     assert eng.st.node == "reproduce", eng.instructions()
     assert "ALONGSIDE start `factory-locate` (sonnet) in the SAME message" in eng.instructions()
+    triage_done = eng.instructions()
+    assert "SCOUT    first start `factory-scout` (haiku)" not in triage_done  # reproduce is not scouted
     fake.snapshot(eng.dir / "snapshots", "before", "profile")
     eng.submit("reproduce", REPRO)
 
@@ -221,3 +223,48 @@ def test_fix_gets_locate_hint_when_present(repo: Path, fake: FakePlatform) -> No
     (eng.dir / "context").mkdir(exist_ok=True)
     (eng.dir / "context/locate.json").write_text('{"files": []}')
     assert "HINT     " in eng.instructions() and "locate.json" in eng.instructions()
+
+
+def test_reasoning_steps_get_a_haiku_scout_first(repo: Path, fake: FakePlatform) -> None:
+    eng = Engine.start(load(repo), "APP-1")
+    to_fix(eng, fake)
+    text = eng.instructions()
+    assert eng.st.node == "fix" and text.index("SCOUT") < text.index("AGENT")
+    assert "`factory-scout` (haiku)" in text and "fix-scout.md" in text
+    (eng.dir / "context").mkdir(exist_ok=True)
+    (eng.dir / "context/fix-scout.md").write_text("facts\n")
+    text = eng.instructions()
+    assert "SCOUT" not in text and "fix-scout.md" in text and "HINT     " in text
+
+
+def test_history_runs_alongside_reproduce_and_hints_the_fix(repo: Path, fake: FakePlatform) -> None:
+    eng = Engine.start(load(repo), "APP-1")
+    to_fix(eng, fake)
+    (eng.dir / "context").mkdir(exist_ok=True)
+    (eng.dir / "context/history.json").write_text("{}")
+    assert "history.json  (the code's past" in eng.instructions()
+
+
+def test_reviewers_start_alongside_verify_and_their_parts_count_for_the_same_diff(
+    repo: Path, fake: FakePlatform
+) -> None:
+    import time
+
+    eng = Engine.start(load(repo), "APP-1")
+    to_fix(eng, fake)
+    edit(repo)
+    eng.submit("fix", FIX)
+    while eng.st.node != "verify":
+        eng.resume()
+    text = eng.instructions()
+    assert "ALONGSIDE start `factory-review-correctness` (opus)" in text
+    assert (eng.dir / "context/diff.patch").is_file()  # built after checks, before verify
+    time.sleep(0.01)
+    for p in ("review-correctness", "review-taste", "review-detectors"):
+        (eng.dir / "context" / f"{p}.json").write_text('{"findings": []}')
+    assert [
+        str(f).rsplit("/", 1)[-1] for f in eng._parts_done(["review-correctness", "review-taste", "review-detectors"])
+    ] == ["review-correctness.json", "review-taste.json", "review-detectors.json"]
+    diff = eng.dir / "context/diff.patch"
+    diff.touch()  # a new diff (e.g. a review round's fixes): the parts must run again
+    assert eng._parts_done(["review-correctness", "review-taste", "review-detectors"]) == []

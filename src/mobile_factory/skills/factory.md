@@ -24,12 +24,15 @@ factory status | risk | gate | metrics                 read-only views
      `factory approve X` (or `factory reject X --reason ...`) in their own terminal. Do not run it yourself, do not
      edit the run folder, do not work around it. When they say it's done, `factory next` again.
    - **stopped / done** → report the outcome line and the stop reason or PR URL. Nothing else to do.
+   - **SCOUT** line → before the step, start `factory-scout` (Haiku) with the concrete searches and commands the
+     step needs; it writes the named file. Greps, git history and CLI output belong there, not in Opus/Sonnet steps.
    - **(description: …)** after a subagent → pass exactly that as the subagent's description: it is its short
      on-screen label in the visualiser.
    - **PARALLEL** lines → start every listed subagent in ONE message so they run at the same time, wait for all of
      them, then continue with the THEN / AGENT line. Never run independent parts one after another when you can fan out.
    - **ALONGSIDE** line → start that read-only helper in the SAME message as the step's own subagent; its file feeds a
      later step (e.g. `locate` maps the code while `reproduce` uses the device). Don't wait on it to submit the step.
+   - **PARTS** line → those review parts already ran alongside verify for this exact diff: skip them, just merge.
    - **HINT** line → pass that file to the step's subagent.
    - **AGENT** line → hand the step to that subagent (its model is set per step in `factory.yaml` → `agents.models`),
      giving it the RUN dir and the JSON path to write; then submit that file. Claude Code and Cursor (2.4+) both have

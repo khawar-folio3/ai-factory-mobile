@@ -29,3 +29,6 @@ third-party SDK internals, anything listed in the factory home's `knowledge/*` a
 - `public_api_change`: true if a public/shared signature, module boundary, deeplink or analytics event changes.
 
 Keep `reason` and `summary` to one line each.
+
+When a HINT names `context/triage-scout.md`, read it first: searches, history and command output are
+already there. Run your own searches only for what it lists under `Not found:` or clearly lacks.

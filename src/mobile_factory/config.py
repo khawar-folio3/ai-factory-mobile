@@ -153,6 +153,8 @@ DEFAULT_MODELS = {
     "guardrail-learn": "sonnet",
     "learn-tally": "sonnet",
     "locate": "sonnet",
+    "history": "haiku",  # git log/blame and past PRs: facts, no judgement
+    "scout": "haiku",  # greps, git history, CLI output: mechanical work stays on the cheapest tier
 }
 
 
@@ -162,6 +164,7 @@ class AgentsConfig(_Model):
     )  # per developer (local.yaml)
     models: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_MODELS))
     parallel: bool = True  # fan independent sub-tasks out to subagents at once (Claude Code, Cursor 2.4+)
+    max_parallel: int = 16  # upper bound on subagents started at once; work is split as finely as this allows
     # Cursor wants its own model ids (Settings → Models); a tier left as "inherit" runs on the chat's model
     cursor_models: dict[str, str] = Field(
         default_factory=lambda: {"haiku": "inherit", "sonnet": "inherit", "opus": "inherit"}

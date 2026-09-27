@@ -245,18 +245,21 @@ def _read_jsonl(p: Path) -> list[dict[str, Any]]:
     return [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()] if p.is_file() else []
 
 
-MAX_PARALLEL = 8  # Cursor runs up to 4 subagents at once; Claude Code more
+MAX_PARALLEL = 16  # default for agents.max_parallel
+MIN_CHUNK = 25  # comments per tally: smaller chunks cost more in startup than they save
 
 
-def chunks(data_dir: Path, min_size: int = 100, source: str = "reviews.jsonl") -> list[tuple[int, int]]:
-    """1-based inclusive line ranges of `source`, one per parallel tally subagent."""
+def chunks(
+    data_dir: Path, min_size: int = MIN_CHUNK, source: str = "reviews.jsonl", parallel: int = MAX_PARALLEL
+) -> list[tuple[int, int]]:
+    """1-based inclusive line ranges of `source`: as many parallel tally subagents as the work and `parallel` allow."""
     p = data_dir / source
     n = sum(1 for ln in p.read_text().splitlines() if ln.strip()) if p.is_file() else 0
-    size = max(min_size, -(-n // MAX_PARALLEL))
+    size = max(min_size, -(-n // max(1, parallel)))
     return [(a, min(a + size - 1, n)) for a in range(1, n + 1, size)]
 
 
-def parallel_plan(data_dir: Path, source: str = "reviews.jsonl") -> str:
+def parallel_plan(data_dir: Path, source: str = "reviews.jsonl", parallel: int = MAX_PARALLEL) -> str:
     rel = str(data_dir).replace(str(Path.home()), "~")
     lines = [
         f"PARALLEL start ALL of these in one message; each tallies its lines of {rel}/{source}, read-only."
@@ -264,7 +267,7 @@ def parallel_plan(data_dir: Path, source: str = "reviews.jsonl") -> str:
     ]
     lines += [
         f"  factory-learn-tally  lines {a}-{b}  ->  {rel}/tally-{i}.json  (description: tally {i})"
-        for i, (a, b) in enumerate(chunks(data_dir, source=source), 1)
+        for i, (a, b) in enumerate(chunks(data_dir, source=source, parallel=parallel), 1)
     ]
     lines.append("THEN     cluster every tally file into the taste rules file (guardrail-learn skill, steps 4-6)")
     return "\n".join(lines)

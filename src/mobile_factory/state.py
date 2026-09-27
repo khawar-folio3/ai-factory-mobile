@@ -28,7 +28,9 @@ class GateRecord(BaseModel):
 class RunState(BaseModel):
     id: str
     ticket: str
-    pipeline: str = "bugfix"
+    pipeline: str = "bugfix"  # the workflow
+    workflow_source: str = ""  # jira | text | override
+    workflow_reason: str = ""
     created_at: str
     updated_at: str
     status: Status = "running"

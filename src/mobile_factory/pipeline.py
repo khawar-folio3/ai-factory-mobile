@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from . import autonomy, events, usage, viz, workflow
+from . import autonomy, classify, events, usage, viz, workflow
 from .config import LoadedConfig, TrackerConfig
 from .errors import FactoryError, Refused, Stop
 from .gitops import Git
@@ -79,12 +79,19 @@ class Engine:
     # ---------- lifecycle ----------
 
     @classmethod
-    def start(cls, lc: LoadedConfig, ticket: str, ceiling: int | None = None, base: str | None = None) -> Engine:
+    def start(
+        cls,
+        lc: LoadedConfig,
+        ticket: str,
+        ceiling: int | None = None,
+        base: str | None = None,
+        workflow_name: str | None = None,
+    ) -> Engine:
         store = RunStore(lc.runs_dir)
         for other in store.all():
             if other.ticket == ticket and not other.finished:
                 raise FactoryError(f"{ticket} already has an open run {other.id}: `factory resume` or `factory abort`")
-        wf = workflow.get(_route_ticket(lc, ticket))
+        wf = workflow.get(workflow_name or _route_ticket(lc, ticket))
         nodes = wf.steps
         st = RunState(
             id=new_run_id(ticket),
@@ -92,6 +99,8 @@ class Engine:
             created_at=events.now(),
             updated_at=events.now(),
             pipeline=wf.name,
+            workflow_source="override" if workflow_name else "",
+            workflow_reason="chosen with --workflow" if workflow_name else "",
             node=nodes[0].name,
             ceiling=min(wf.max_level, lc.cfg.autonomy.ceiling if ceiling is None else ceiling),
             base=base or ("" if lc.cfg.project.base_branch == "ask" else lc.cfg.project.base_branch),
@@ -400,7 +409,10 @@ class Engine:
         cur = {"waiting_gate": "◆", "stopped": "✕", "done": "●"}.get(self.st.status, "◉")
         dots = "".join("●" if j < i else (cur if j == i else "○") for j in range(len(names)))
         risk = f"risk {self.st.risk.score} · L{self.st.level}" if self.st.risk else f"ceiling L{self.st.ceiling}"
-        return f"{self.st.ticket}  {dots}  {self.st.node} ({i + 1}/{len(names)}) · {risk} · run {self.st.id}"
+        return (
+            f"{self.st.ticket}  {dots}  {self.st.node} ({i + 1}/{len(names)}) · {self.st.pipeline} · {risk}"
+            f" · run {self.st.id}"
+        )
 
     def gate_summary(self, gate: str) -> str:
         if gate == "plan":
@@ -471,11 +483,26 @@ def route(tc: TrackerConfig, ticket_type: str, parent_type: str = "") -> str:
     )
 
 
+def detect_workflow(tc: TrackerConfig, t: tracker.Ticket) -> classify.Detection:
+    """The Jira type's workflow unless the ticket's text clearly says otherwise (tracker.detect)."""
+    try:
+        by_type = route(tc, t.type, t.parent_type) if t.type else ""
+    except Stop:
+        by_type = ""  # unmapped type: let the text decide
+    if not tc.detect:
+        if not by_type and t.type:
+            route(tc, t.type, t.parent_type)  # raises the clear "no workflow" reason
+        return classify.Detection(by_type or "bugfix", "jira", "ticket type", {})
+    found = classify.detect(by_type, t.summary, t.description)
+    if t.type and not by_type and not any(found.scores.values()):
+        route(tc, t.type, t.parent_type)  # an unknown type and no signal in the text: stop with the clear reason
+    return found
+
+
 def _route_ticket(lc: LoadedConfig, key: str) -> str:
     """Pick the workflow before the run starts, so its first steps are the right ones; intake re-checks it."""
     try:
-        t = tracker.make(lc.cfg.tracker, lc.root).get(key)
-        return route(lc.cfg.tracker, t.type, t.parent_type)
+        return detect_workflow(lc.cfg.tracker, tracker.make(lc.cfg.tracker, lc.root).get(key)).workflow
     except (FactoryError, Stop):
         return "bugfix"  # intake reports the real problem
 
@@ -485,12 +512,22 @@ def _intake(e: Engine) -> dict[str, Any]:
     tc = e.cfg.tracker
     if tc.projects and t.key.split("-")[0] not in tc.projects:
         raise Stop("ineligible", f"{t.key} is outside tracker.projects {tc.projects}")
-    if (want := route(tc, t.type, t.parent_type)) != e.st.pipeline:
-        raise Stop("ineligible", f"{t.key} is a {t.type} ({want}) but the run started as {e.st.pipeline}; start again")
+    found = detect_workflow(tc, t)
+    if e.st.workflow_source != "override" and found.workflow != e.st.pipeline:
+        raise Stop("ineligible", f"{t.key} needs {found.workflow} ({found.reason}) but the run is {e.st.pipeline}")
+    if e.st.workflow_source != "override":
+        e.st.workflow_source, e.st.workflow_reason = found.source, found.reason
     if blocked := t.blocked_labels(tc.block_labels):
         raise Stop("ineligible", f"label {', '.join(blocked)}")
     (e.dir / "ticket.json").write_text(t.model_dump_json(indent=2))
-    return {"type": t.type, "summary": t.summary, "url": tracker.ticket_url(tc, t), "mentions_ios": t.mentions_ios()}
+    return {
+        "type": t.type,
+        "workflow": e.st.pipeline,
+        "why": e.st.workflow_reason,
+        "summary": t.summary,
+        "url": tracker.ticket_url(tc, t),
+        "mentions_ios": t.mentions_ios(),
+    }
 
 
 def _branch(e: Engine) -> dict[str, Any]:

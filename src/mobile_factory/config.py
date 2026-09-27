@@ -124,6 +124,7 @@ class TrackerConfig(_Model):
     token: str = ""
     projects: list[str] = Field(default_factory=list)
     allowed_types: list[str] = Field(default_factory=lambda: ["Bug", "Task"])  # legacy; routing uses `pipelines`
+    detect: bool = True  # pick the workflow from the ticket's text when it clearly contradicts the Jira type
     pipelines: dict[str, str] = Field(  # ticket type -> workflow; unmapped types stop with a clear reason
         default_factory=lambda: {
             "Bug": "bugfix",

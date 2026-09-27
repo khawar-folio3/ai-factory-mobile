@@ -272,3 +272,49 @@ def test_task_checks_done_criteria_without_a_device_step(repo: Path, fake: FakeP
     eng.submit("review", {"findings": []})
     assert eng.st.status == "done" and eng.st.outcome == "draft-pr", eng.instructions()
     assert eng.st.branch.startswith("task/APP-20-")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            "Task",
+            "Crash when opening Profile",
+            "Steps to reproduce: open Profile. Expected: opens. Actual: crash.",
+            "bugfix",
+            "text",
+        ),
+        ("Story", "Investigate: should we drop the legacy map SDK?", "Evaluate the options.", "spike", "text"),
+        ("Task", "Bump OkHttp to 5.1", "Upgrade okhttp from 4.12 to 5.1.", "task", "jira"),
+        (
+            "Story",
+            "Favourites filter",
+            "As a user, I want to filter spaces. Acceptance criteria: chip shows.",
+            "feature",
+            "jira",
+        ),
+        ("", "App crashes on launch", "Steps to reproduce: launch. Actual: crash.", "bugfix", "text"),
+    ],
+)
+def test_workflow_is_detected_from_the_text(repo: Path, case: tuple[str, str, str, str, str]) -> None:
+    jira, summary, body, want, source = case
+    from mobile_factory.integrations.tracker import Ticket
+    from mobile_factory.pipeline import detect_workflow
+
+    d = detect_workflow(load(repo).cfg.tracker, Ticket(key="APP-1", type=jira, summary=summary, description=body))
+    assert (d.workflow, d.source) == (want, source), d
+
+
+def test_a_bug_filed_as_a_task_runs_the_bug_workflow_and_says_why(repo: Path, fake: FakePlatform) -> None:
+    ticket(repo, "APP-30", "Task", "Crash when opening Profile", "Steps to reproduce: open Profile. Actual: crash.")
+    eng = Engine.start(load(repo), "APP-30")
+    eng.advance()
+    assert eng.st.pipeline == "bugfix" and eng.st.node == "triage"
+    assert eng.st.workflow_source == "text" and "reads like bugfix, not task" in eng.st.workflow_reason
+
+
+def test_workflow_can_be_forced(repo: Path, fake: FakePlatform) -> None:
+    ticket(repo, "APP-31", "Task", "Crash when opening Profile", "Steps to reproduce: open Profile.")
+    eng = Engine.start(load(repo), "APP-31", workflow_name="task")
+    eng.advance()
+    assert eng.st.pipeline == "task" and eng.st.node == "plan" and eng.st.workflow_source == "override"

@@ -928,10 +928,18 @@ def run(
         str | None, typer.Option(help="Base branch for this run (required when base_branch is 'ask').")
     ] = None,
     autonomy: Annotated[int | None, typer.Option(min=0, max=4, help="Autonomy ceiling for this run (0-4).")] = None,
+    workflow_name: Annotated[
+        str | None,
+        typer.Option("--workflow", help="Force a workflow instead of detecting it (bugfix, task, feature, …)."),
+    ] = None,
 ) -> None:
     """Start a run for a ticket and advance to the first agent step or gate."""
-    eng = Engine.start(_lc(), ticket, ceiling=autonomy, base=base)
+    if workflow_name and workflow_name not in workflow.all_workflows():
+        raise FactoryError(f"unknown workflow {workflow_name}; known: {', '.join(workflow.all_workflows())}")
+    eng = Engine.start(_lc(), ticket, ceiling=autonomy, base=base, workflow_name=workflow_name)
     eng.advance()
+    if eng.st.workflow_reason:
+        _say(f"  workflow: {eng.st.pipeline}  ({eng.st.workflow_reason})", hints=True)
     _say(eng.instructions())
 
 

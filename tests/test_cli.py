@@ -86,7 +86,7 @@ def test_run_submit_and_gate_via_cli(in_repo: Path, fake: FakePlatform) -> None:
     assert "TASK" in r.output and "factory submit work" in r.output
     assert "✓ Branch & checkpoint" in r.output and "WAITING ON A HUMAN" not in r.output
     assert "Approve" not in runner.invoke(app, ["next"]).output
-    assert "work (4/10)" in runner.invoke(app, ["status"]).output
+    assert "Work (in this session) · 4/10" in runner.invoke(app, ["status"]).output
     assert "APP-1" in runner.invoke(app, ["status", "--all"]).output
     assert "runs 1" in runner.invoke(app, ["metrics"]).output
     evs = runner.invoke(app, ["events"]).output.splitlines()

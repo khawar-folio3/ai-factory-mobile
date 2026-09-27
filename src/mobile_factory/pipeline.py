@@ -573,11 +573,7 @@ class Engine:
         i = names.index(self.st.node)
         cur = {"waiting_gate": "◆", "stopped": "✕", "done": "●"}.get(self.st.status, "◉")
         dots = "".join("●" if j < i else (cur if j == i else "○") for j in range(len(names)))
-        risk = f"risk {self.st.risk.score} · L{self.st.level}" if self.st.risk else f"ceiling L{self.st.ceiling}"
-        return (
-            f"{self.st.ticket}  {dots}  {self.st.node} ({i + 1}/{len(names)}) · {self.st.pipeline} · {risk}"
-            f" · run {self.st.id}"
-        )
+        return f"{self.st.ticket}  {dots}  {self.nodes[i].title or self.st.node} · {i + 1}/{len(names)}"
 
     def gate_summary(self, gate: str) -> str:
         if gate == "plan":

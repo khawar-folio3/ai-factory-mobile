@@ -38,6 +38,8 @@ class Ticket(BaseModel):
     key: str
     url: str = ""
     type: str = ""
+    parent: str = ""  # parent key (sub-tasks, stories under an epic)
+    parent_type: str = ""
     status: str = ""
     status_category: str = ""
     priority: str = ""
@@ -103,6 +105,8 @@ def from_jira_fields(key: str, fields: dict[str, Any], url: str = "") -> Ticket:
         key=key,
         url=url,
         type=_name(fields.get("issuetype")),
+        parent=str((fields.get("parent") or {}).get("key", "")),
+        parent_type=_name(((fields.get("parent") or {}).get("fields") or {}).get("issuetype")),
         status=_name(status),
         status_category=str((status.get("statusCategory") or {}).get("key", "")) if isinstance(status, dict) else "",
         priority=_name(fields.get("priority")),

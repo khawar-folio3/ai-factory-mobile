@@ -19,8 +19,8 @@ factory status | risk | gate | metrics                 read-only views
 ## Workflows
 
 The ticket's type picks the workflow (`tracker.pipelines`); the run shows it and `factory next` walks it:
-bugfix (Bug, Task) · feature (Story, Improvement) · spike (Spike: report, no code) · epic (Epic: stories) ·
-new-app (App: spec → architecture → first slice PR → backlog, a human at every gate).
+bugfix (Bug) · task (Task: done-criteria, no device repro) · feature (Story, Improvement) · spike (Spike: report, no code) · epic (Epic: stories) ·
+new-app (App: spec → architecture → first slice PR → backlog, a human at every gate). A Sub-task runs its parent's workflow.
 Every step's TASK, SKILL and output schema come from the run; never assume bug-fix steps.
 
 ## Loop

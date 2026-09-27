@@ -450,12 +450,18 @@ def _preflight(e: Engine) -> dict[str, Any]:
     return {"base": e.st.base, "base_sha": e.git("rev-parse", f"{e.cfg.vcs.remote}/{e.st.base}")}
 
 
-def route(tc: TrackerConfig, ticket_type: str) -> str:
-    """The workflow for a ticket type (tracker.pipelines); file tickets without a type are bug fixes."""
+def route(tc: TrackerConfig, ticket_type: str, parent_type: str = "") -> str:
+    """The workflow for a ticket type (tracker.pipelines); 'parent' means the parent's workflow (sub-tasks);
+    file tickets without a type are bug fixes."""
     if not ticket_type:
         return "bugfix"
     known = workflow.all_workflows()
-    if pipe := tc.pipelines.get(ticket_type):
+    pipe = tc.pipelines.get(ticket_type)
+    if pipe == "parent":
+        if not parent_type or tc.pipelines.get(parent_type, "parent") == "parent":
+            raise Stop("ineligible", f"{ticket_type} has no parent with a workflow: run the parent, or map the type")
+        return route(tc, parent_type)
+    if pipe:
         if pipe not in known:
             raise Stop("ineligible", f"{ticket_type} maps to workflow '{pipe}', which does not exist")
         return pipe
@@ -468,7 +474,8 @@ def route(tc: TrackerConfig, ticket_type: str) -> str:
 def _route_ticket(lc: LoadedConfig, key: str) -> str:
     """Pick the workflow before the run starts, so its first steps are the right ones; intake re-checks it."""
     try:
-        return route(lc.cfg.tracker, tracker.make(lc.cfg.tracker, lc.root).get(key).type)
+        t = tracker.make(lc.cfg.tracker, lc.root).get(key)
+        return route(lc.cfg.tracker, t.type, t.parent_type)
     except (FactoryError, Stop):
         return "bugfix"  # intake reports the real problem
 
@@ -478,7 +485,7 @@ def _intake(e: Engine) -> dict[str, Any]:
     tc = e.cfg.tracker
     if tc.projects and t.key.split("-")[0] not in tc.projects:
         raise Stop("ineligible", f"{t.key} is outside tracker.projects {tc.projects}")
-    if (want := route(tc, t.type)) != e.st.pipeline:
+    if (want := route(tc, t.type, t.parent_type)) != e.st.pipeline:
         raise Stop("ineligible", f"{t.key} is a {t.type} ({want}) but the run started as {e.st.pipeline}; start again")
     if blocked := t.blocked_labels(tc.block_labels):
         raise Stop("ineligible", f"label {', '.join(blocked)}")

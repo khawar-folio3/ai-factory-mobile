@@ -24,7 +24,7 @@ def approve(eng: Engine, gate: str) -> None:
 
 def test_every_workflow_is_well_formed() -> None:
     wfs = workflow.all_workflows()
-    assert set(wfs) == {"bugfix", "feature", "spike", "epic", "new-app"}
+    assert set(wfs) == {"bugfix", "task", "feature", "spike", "epic", "new-app"}
     from mobile_factory.outputs import EXAMPLES, MODELS
     from mobile_factory.pipeline import AUTO, POST
 
@@ -52,13 +52,16 @@ def test_ticket_types_route_to_workflows(repo: Path) -> None:
     tc = load(repo).cfg.tracker
     assert [route(tc, t) for t in ("Bug", "Task", "Story", "Spike", "Epic", "App", "")] == [
         "bugfix",
-        "bugfix",
+        "task",
         "feature",
         "spike",
         "epic",
         "new-app",
         "bugfix",
     ]
+    assert route(tc, "Sub-task", "Story") == "feature" and route(tc, "Sub-task", "Bug") == "bugfix"
+    with pytest.raises(Exception, match="no parent with a workflow"):
+        route(tc, "Sub-task", "")
 
 
 def test_unmapped_type_stops_with_the_reason(repo: Path, fake: FakePlatform) -> None:
@@ -238,3 +241,34 @@ def test_new_app_goes_spec_architecture_first_slice_then_backlog(repo: Path, fak
     assert eng.st.status == "done" and eng.st.outcome == "draft-pr", eng.instructions()
     assert eng.out("create_tickets")["created"] == ["APP-11"]  # the rest of the spec, as stories
     assert "Print a visitor badge" in (config.state_dir(repo) / "tickets/APP-11.md").read_text()
+
+
+def test_task_checks_done_criteria_without_a_device_step(repo: Path, fake: FakePlatform) -> None:
+    ticket(repo, "APP-20", "Task", "Clean up Profile")
+    eng = Engine.start(load(repo), "APP-20")
+    assert eng.st.pipeline == "task"
+    eng.advance()
+    eng.submit(
+        "plan",
+        {
+            **PLAN,
+            "summary": "Bump OkHttp to 5.1",
+            "acceptance_criteria": ["OkHttp is 5.1", "Unit tests pass"],
+            "screens": [],
+        },
+    )
+    assert eng.st.node == "implement"  # no baseline or reproduce for technical work
+    (repo / "app/src/main/java/Profile.kt").write_text("class Profile {\n    val height = 48 // cleaned up\n}\n")
+    eng.submit("implement", {"summary": "Bump OkHttp to 5.1", "changes": "version catalog"})
+    eng.submit(
+        "accept",
+        {
+            "criteria": [
+                {"criterion": "OkHttp is 5.1", "met": True, "evidence": "gradle dependencies"},
+                {"criterion": "Unit tests pass", "met": True, "evidence": "checks step"},
+            ]
+        },
+    )
+    eng.submit("review", {"findings": []})
+    assert eng.st.status == "done" and eng.st.outcome == "draft-pr", eng.instructions()
+    assert eng.st.branch.startswith("task/APP-20-")

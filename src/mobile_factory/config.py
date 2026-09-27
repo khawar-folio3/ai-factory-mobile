@@ -49,7 +49,7 @@ class ProjectConfig(_Model):
     base_branch: str = "ask"
     branch_pattern: str = "bugfix/{key}-{slug}"
     branch_pattern_by_type: dict[str, str] = Field(
-        default_factory=lambda: {t: "feature/{key}-{slug}" for t in ("Task", "Story", "Improvement", "New Feature")}
+        default_factory=dict  # ticket type -> branch pattern; each workflow has its own default
     )
     forbidden_paths: list[str] = Field(
         default_factory=lambda: [
@@ -127,8 +127,9 @@ class TrackerConfig(_Model):
     pipelines: dict[str, str] = Field(  # ticket type -> workflow; unmapped types stop with a clear reason
         default_factory=lambda: {
             "Bug": "bugfix",
-            "Task": "bugfix",
-            "Sub-task": "bugfix",
+            "Task": "task",
+            "Sub-task": "parent",  # a sub-task runs its parent's workflow
+            "Subtask": "parent",
             "Story": "feature",
             "Improvement": "feature",
             "New Feature": "feature",

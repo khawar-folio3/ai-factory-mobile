@@ -142,11 +142,18 @@ def test_feature_rejects_unchecked_criteria_and_retries_failed_ones(repo: Path, 
     assert eng.st.node == "implement" and "acceptance failed: Avatar is 64dp tall" in eng.instructions()
 
 
-def test_too_big_story_stops_with_proposed_subtasks(repo: Path, fake: FakePlatform) -> None:
+def test_too_big_story_asks_split_or_one_pr(repo: Path, fake: FakePlatform) -> None:
+    from mobile_factory.pipeline import ONE_PR, SPLIT
+
     ticket(repo, "APP-4", "Story", "Redo the whole app")
     eng = Engine.start(load(repo), "APP-4")
     eng.advance()
     eng.submit("plan", {**PLAN, "verdict": "too-big", "subtasks": ["part one", "part two"]})
+    assert eng.st.status == "waiting_answers" and eng.out("_ask")["choices"] == [SPLIT, ONE_PR]
+    eng.answer([ONE_PR])
+    assert eng.st.node == "plan" and ONE_PR in eng.answers_file.read_text()
+    eng.submit("plan", {**PLAN, "verdict": "too-big", "subtasks": ["part one", "part two"]})
+    eng.answer([SPLIT])
     assert eng.st.outcome == "too-big" and (eng.dir / "subtasks.md").read_text() == "- part one\n- part two\n"
 
 
@@ -415,3 +422,37 @@ def test_wizard_runs_agent_steps_asks_at_gates_pauses_and_picks_up(
         cli._wizard(again)
     assert again.st.gates["plan"].decision == "approved" and "baseline" in calls
     assert Engine.load(load(repo), eng.st.id).st.node == "implement"  # progress was saved
+
+
+def test_wizard_asks_the_questions_inline(repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json as js
+
+    import typer
+
+    from mobile_factory import cli
+
+    ticket(repo, "APP-41", "Story", "Taller avatar")
+    plans = [{**PLAN, "verdict": "needs-info", "questions": ["How tall?", "Which screens?"]}, PLAN]
+
+    def fake_agent(cmds: list[list[str]], cwd: Path, logs: list[Path], stage: object, **_: object) -> int:
+        prompt = cmds[0][2]
+        if "outputs/plan.json" not in prompt or not plans:
+            return 1
+        if len(plans) == 1:
+            assert "ANSWERS" in prompt  # the second plan run sees the answers
+        Path(prompt.split("write the output JSON to ")[1].split(" ")[0]).write_text(js.dumps(plans.pop(0)))
+        return 0
+
+    answers = iter(["64dp", ""])
+    monkeypatch.setattr(cli, "_agent_cli", lambda lc: "claude")
+    monkeypatch.setattr(cli, "_run_watched", fake_agent)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli.typer, "prompt", lambda *a, **k: next(answers))
+    monkeypatch.setattr(cli, "_choose", lambda q, options, default: 2)  # pause at the plan gate
+    eng = Engine.start(load(repo, ceiling=0), "APP-41")
+    eng.advance()
+    with pytest.raises(typer.Exit):
+        cli._wizard(eng)
+    text = eng.answers_file.read_text()
+    assert "A: 64dp" in text and "Which screens?" in text and "not sure" in text
+    assert eng.st.status == "waiting_gate" and eng.node().gate == "plan"

@@ -970,7 +970,9 @@ def _wizard(eng: Engine) -> None:
         while not eng.st.finished:
             _show(eng, brief=True)
             node = eng.node()
-            if eng.st.status == "waiting_gate":
+            if eng.st.status == "waiting_answers":
+                _answer_here(eng)
+            elif eng.st.status == "waiting_gate":
                 _gate_here(eng, node.gate or "")
             elif node.kind == "agent" and eng.st.status == "waiting_agent":
                 if not agent:
@@ -987,6 +989,38 @@ def _wizard(eng: Engine) -> None:
         typer.echo()
         _say(f"  ○ paused at {eng.node().title}. Pick up with: factory run {eng.st.ticket}", hints=True)
         raise typer.Exit(0) from None
+
+
+def _answer_here(eng: Engine) -> None:
+    """The step is unsure: ask the developer here, then the same step runs again with the answers."""
+    ask = eng.out("_ask")
+    typer.echo(f"  {typer.style('? needs your input', fg='yellow', bold=True)}")
+    for ln in _wrap(ask.get("reason", ""), lines=4):
+        typer.echo(typer.style(ln, dim=True))
+    typer.echo()
+    if ask.get("choices"):
+        pick = _choose(ask["questions"][0], ask["choices"], 0)
+        eng.answer([ask["choices"][pick]])
+        return
+    answers = []
+    total = len(ask["questions"])
+    for i, q in enumerate(ask["questions"], 1):
+        typer.echo(f"  {typer.style(f'{i}/{total}', fg='cyan', bold=True)}")
+        for ln in _wrap(q, lines=6):
+            typer.echo(ln)
+        answers.append(
+            _answer(typer.prompt(_q("Answer (empty = not sure, q = pause)"), default="", show_default=False))
+        )
+        typer.echo()
+    if not any(answers):
+        how = _choose(
+            "No answers: what now?",
+            ["Continue: the agent assumes and says which assumptions", "Pause (answer on the ticket first)"],
+            0,
+        )
+        if how == 1:
+            raise _Quit()
+    eng.answer(answers)
 
 
 def _gate_here(eng: Engine, gate: str) -> None:
@@ -1126,6 +1160,10 @@ def _show(eng: Engine, brief: bool = False) -> None:
         return
     if st.finished:
         _result(eng)
+    elif st.status == "waiting_answers":
+        n = len(eng.out("_ask").get("questions", []))
+        typer.echo(f"  {typer.style('? needs your input', fg='yellow', bold=True)}  {n} question(s)")
+        typer.echo(f"  {typer.style('answer them:', dim=True)} factory run {st.ticket}")
     elif st.status == "waiting_gate":
         gate = node.gate or ""
         first = eng.gate_summary(gate).splitlines()[0] if eng.gate_summary(gate) else ""

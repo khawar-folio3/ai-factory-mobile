@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from .autonomy import RiskAssessment, RiskSignals
 from .errors import FactoryError
 
-Status = Literal["running", "waiting_agent", "waiting_gate", "done", "stopped"]
+Status = Literal["running", "waiting_agent", "waiting_gate", "waiting_answers", "done", "stopped"]
 
 
 class GateRecord(BaseModel):
@@ -41,6 +41,7 @@ class RunState(BaseModel):
     checkpoint: str = ""
     fix_attempts: int = 0
     review_rounds: int = 0
+    question_rounds: int = 0
     signals: RiskSignals = Field(default_factory=RiskSignals)
     risk: RiskAssessment | None = None
     outputs: dict[str, dict[str, Any]] = Field(default_factory=dict)

@@ -40,6 +40,8 @@ Every step's TASK, SKILL and output schema come from the run; never assume bug-f
    - **ALONGSIDE** line → start that read-only helper in the SAME message as the step's own subagent; its file feeds a
      later step (e.g. `locate` maps the code while `reproduce` uses the device). Don't wait on it to submit the step.
    - **PARTS** line → those review parts already ran alongside verify for this exact diff: skip them, just merge.
+   - **QUESTIONS FOR THE USER** → ask the user in the chat, word for word; write their answers where it says,
+     then `factory resume`. Never answer them yourself.
    - **HINT** line → pass that file to the step's subagent.
    - **AGENT** line → hand the step to that subagent (its model is set per step in `factory.yaml` → `agents.models`),
      giving it the RUN dir and the JSON path to write; then submit that file. Claude Code and Cursor (2.4+) both have

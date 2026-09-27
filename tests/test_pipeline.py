@@ -124,12 +124,42 @@ def test_forbidden_path_stops(repo: Path, fake: FakePlatform) -> None:
     assert eng.st.outcome == "forbidden-path"
 
 
-def test_ineligible_triage_stops(repo: Path, fake: FakePlatform) -> None:
+def test_unclear_triage_asks_the_developer_then_runs_again(repo: Path, fake: FakePlatform) -> None:
     eng = Engine.start(load(repo), "APP-1")
     eng.advance()
     eng.submit("triage", {**TRIAGE, "verdict": "needs-info", "questions": ["which device?"]})
-    assert eng.st.outcome == "needs-info"
-    assert (eng.dir / "questions.md").read_text().strip() == "- which device?"
+    assert eng.st.status == "waiting_answers" and not eng.st.finished
+    assert "QUESTIONS FOR THE USER" in eng.instructions() and "which device?" in eng.instructions()
+    eng.answer(["Pixel 7, Android 14"])
+    assert eng.st.status == "waiting_agent" and eng.st.node == "triage"
+    assert "Pixel 7, Android 14" in eng.answers_file.read_text()
+    assert f"ANSWERS {eng.answers_file}" in eng.instructions()  # every later step sees them
+    eng.submit("triage", TRIAGE)
+    assert eng.st.node == "reproduce"
+
+
+def test_answers_written_from_the_chat_resume_the_step(repo: Path, fake: FakePlatform) -> None:
+    import os
+    import time
+
+    eng = Engine.start(load(repo), "APP-1")
+    eng.advance()
+    eng.submit("triage", {**TRIAGE, "verdict": "needs-info", "questions": ["which device?"]})
+    eng.answers_file.write_text("- Q: which device?\n  A: Pixel 7\n")
+    later = time.time() + 5
+    os.utime(eng.answers_file, (later, later))
+    eng.advance()  # `factory resume`
+    assert eng.st.status == "waiting_agent" and eng.st.node == "triage"
+
+
+def test_questions_stop_after_three_rounds(repo: Path, fake: FakePlatform) -> None:
+    eng = Engine.start(load(repo), "APP-1")
+    eng.advance()
+    for _ in range(3):
+        eng.submit("triage", {**TRIAGE, "verdict": "needs-info", "questions": ["which device?"]})
+        eng.answer([""])
+    eng.submit("triage", {**TRIAGE, "verdict": "needs-info", "questions": ["which device?"]})
+    assert eng.st.outcome == "needs-info" and "3 rounds" in eng.st.stop_reason
 
 
 def test_detector_findings_must_be_answered_and_review_loops(repo: Path, fake: FakePlatform) -> None:

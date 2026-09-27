@@ -45,6 +45,18 @@ from .state import GateRecord, RunState, RunStore, new_run_id
 ATTRIBUTION = re.compile(r"claude|chatgpt|copilot|cursor|generated (with|by)|co-authored-by|🤖", re.I)
 
 
+MAX_QUESTION_ROUNDS = 3
+SPLIT, ONE_PR = "Split it into sub-tasks (stops here)", "Do it as one PR anyway"
+
+
+class Ask(Exception):
+    """The step needs the developer: questions to answer, or one choice to make."""
+
+    def __init__(self, reason: str, questions: list[str], choices: list[str] | None = None) -> None:
+        super().__init__(reason)
+        self.reason, self.questions, self.choices = reason, questions, choices or []
+
+
 class Retry(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -162,6 +174,16 @@ class Engine:
     def advance(self) -> RunState:
         try:
             while not self.st.finished:
+                if self.st.status == "waiting_answers":
+                    q = self.dir / "questions.md"
+                    if (
+                        self.answers_file.is_file()
+                        and q.is_file()
+                        and self.answers_file.stat().st_mtime > q.stat().st_mtime
+                    ):
+                        self.st.outputs.pop("_ask", None)  # answered in the agent's chat, written to answers.md
+                        self.st.status = "waiting_agent"
+                    break
                 if self.st.status == "waiting_gate":
                     rec = self.st.gates[self.node().gate or ""]
                     if rec.decision == "pending":
@@ -211,12 +233,53 @@ class Engine:
                 self._after_node(node)
         except Retry as r:
             self._retry(r.reason)
+        except Ask as a:
+            self._ask(node_name, a)
+            self.save()
+            return self.st
         except Stop as s:
             self.finish("stopped", s.outcome, s.reason)
             self.save()
             return self.st
         self.save()
         return self.advance()
+
+    # ---------- questions for the developer ----------
+
+    @property
+    def answers_file(self) -> Path:
+        return self.dir / "answers.md"
+
+    def _ask(self, step: str, a: Ask) -> None:
+        if self.st.question_rounds >= MAX_QUESTION_ROUNDS:
+            (self.dir / "questions.md").write_text("\n".join(f"- {q}" for q in a.questions) + "\n")
+            self.finish("stopped", "needs-info", f"still unclear after {self.st.question_rounds} rounds: {a.reason}")
+            return
+        self.st.question_rounds += 1
+        self.st.status = "waiting_answers"
+        self.st.outputs["_ask"] = {"step": step, "reason": a.reason, "questions": a.questions, "choices": a.choices}
+        (self.dir / "questions.md").write_text("\n".join(f"- {q}" for q in a.questions) + "\n")
+        self.bus.emit(events.GATE_WAITING, self.st.id, gate="questions", ticket=self.st.ticket, summary=a.reason[:200])
+
+    def answer(self, answers: list[str]) -> RunState:
+        """The developer's answers (same order as the questions; '' = not sure). The step runs again with them."""
+        ask = self.out("_ask")
+        if self.st.status != "waiting_answers" or not ask:
+            raise FactoryError("no questions are waiting")
+        if ask.get("choices") and answers and answers[0] == SPLIT:
+            self.finish("stopped", "too-big", ask["reason"])
+            self.save()
+            return self.st
+        with self.answers_file.open("a") as fh:
+            fh.write(f"## Round {self.st.question_rounds} ({ask['step']})\n")
+            for q, ans in zip(ask["questions"], answers, strict=False):
+                fh.write(f"- Q: {q}\n  A: {ans or 'not sure: make the most reasonable assumption and say which'}\n")
+            fh.write("\n")
+        self.st.outputs.pop("_ask", None)
+        self.st.status = "waiting_agent"
+        self.bus.emit(events.GATE_DECIDED, self.st.id, gate="questions", decision="answered")
+        self.save()
+        return self.st
 
     def _after_node(self, node: Node) -> None:
         if node.gate and self._gate_needed(node.gate):
@@ -321,6 +384,15 @@ class Engine:
         head = self.progress()
         if self.st.finished:
             return f"{head}\n{self.st.status}: {self.st.outcome} {self.st.stop_reason or self.st.pr_url}".rstrip()
+        if self.st.status == "waiting_answers":
+            ask = self.out("_ask")
+            qs = "\n".join(f"  {i}. {q}" for i, q in enumerate(ask.get("questions", []), 1))
+            opts = (" Options: " + " | ".join(ask["choices"])) if ask.get("choices") else ""
+            return (
+                f"{head}\nQUESTIONS FOR THE USER from `{ask.get('step')}` ({ask.get('reason', '')[:300]}).\n{qs}\n"
+                f"Ask the user these in the chat, word for word.{opts} Append their answers to {self.answers_file} as"
+                " '- Q: …  A: …' lines (empty answer = 'not sure'), then run `factory resume`."
+            )
         if self.st.status == "waiting_gate":
             gate = node.gate or ""
             return (
@@ -338,6 +410,8 @@ class Engine:
             f"RUN   {self.dir}  (ticket.json, outputs, context/)",
             f"HOME  {self.lc.state_dir}  (taste.md, knowledge/, flows/, tickets/)",
         ]
+        if self.answers_file.is_file():
+            lines.append(f"ANSWERS {self.answers_file}  (the developer's answers to earlier questions: follow them)")
         if fail := self.out("_last_failure"):
             lines.append(f"LAST FAILURE ({fail['node']}): {fail['reason'][-1500:]}")
         if node.type == "review":
@@ -767,9 +841,9 @@ AUTO: dict[str, Callable[[Engine], dict[str, Any] | None]] = {
 
 def _post_triage(e: Engine, o: Any) -> str | None:
     t: TriageOut = o
+    if t.verdict == "needs-info" and t.questions:
+        raise Ask(t.reason, t.questions)
     if t.verdict != "eligible":
-        if t.questions:
-            (e.dir / "questions.md").write_text("\n".join(f"- {q}" for q in t.questions) + "\n")
         raise Stop(t.verdict, t.reason)
     s = e.st.signals
     s.category, s.estimated_files, s.public_api_change, s.risk_classes = (
@@ -826,10 +900,10 @@ def _post_plan(e: Engine, o: Any) -> str | None:
     p: PlanOut = o
     if p.verdict == "too-big":
         (e.dir / "subtasks.md").write_text("\n".join(f"- {t}" for t in p.subtasks) + "\n")
-        raise Stop("too-big", f"{p.reason} — proposed sub-tasks in {e.dir / 'subtasks.md'}")
+        raise Ask(p.reason, [f"It looks too big for one PR ({p.reason[:200]}). How should it go?"], [SPLIT, ONE_PR])
+    if p.verdict == "needs-info" and p.questions:
+        raise Ask(p.reason, p.questions)
     if p.verdict != "eligible":
-        if p.questions:
-            (e.dir / "questions.md").write_text("\n".join(f"- {q}" for q in p.questions) + "\n")
         raise Stop(p.verdict, p.reason)
     if not p.acceptance_criteria:
         raise FactoryError("an eligible plan needs acceptance criteria: from the ticket, or drafted for approval")
@@ -881,8 +955,7 @@ def _post_split(e: Engine, o: Any) -> str | None:
 def _post_spec(e: Engine, o: Any) -> str | None:
     sp: SpecOut = o
     if sp.verdict == "needs-info":
-        (e.dir / "questions.md").write_text("\n".join(f"- {q}" for q in sp.questions) + "\n")
-        raise Stop("needs-info", sp.reason or "the spec needs answers first")
+        raise Ask(sp.reason or "the spec needs answers first", sp.questions or ["What is missing from the ticket?"])
     if not sp.acceptance_criteria:
         raise FactoryError("the spec needs acceptance criteria for the first slice")
     e.st.signals.category = "new-app"

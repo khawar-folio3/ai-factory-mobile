@@ -32,3 +32,6 @@ Keep `reason` and `summary` to one line each.
 
 When a HINT names `context/triage-scout.md`, read it first: searches, history and command output are
 already there. Run your own searches only for what it lists under `Not found:` or clearly lacks.
+
+When ANSWERS is given, those are the developer's decisions: use them, do not ask them again. Ask only
+what the ticket and code cannot tell you, short and specific.

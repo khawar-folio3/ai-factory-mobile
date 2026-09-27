@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
@@ -93,20 +94,13 @@ SUBAGENT_FOOTER = """
 You are one step of a Mobile Factory run, started by the session that drives `factory next`.
 Write your JSON output to the file named in your prompt and reply with that path only.
 Never run `factory submit`, `factory approve` / `reject`, `git commit` / `push`, or edit the run's state.json.
+Never start other agents or subagents: the driving session fans work out, you do yours alone.
 """
 READ_ONLY = (
     "\nRead-only: never edit, create or delete source files; write only your output file."
     " Other agents run at the same time.\n"
 )
-READ_ONLY_PARTS = (
-    "review-correctness",
-    "review-taste",
-    "review-detectors",
-    "locate",
-    "learn-tally",
-    "scout",
-    "history",
-)
+READ_ONLY_PARTS = ("learn-tally",)
 
 
 def subagent_text(name: str, model: str) -> str:
@@ -165,29 +159,42 @@ def _register_claude_mcp(root: Path, servers: dict[str, Any]) -> list[str]:
     return done
 
 
+def _skills(folder: Path) -> list[Path]:
+    out = []
+    for name in skill_names():
+        p = folder / ("factory" if name == "factory" else f"factory-{name}") / "SKILL.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_front_matter(name, skill_text(name)))
+        out.append(p)
+    return out
+
+
+def prune(folder: Path, kept: list[Path]) -> list[Path]:
+    """factory-* skills and subagents an older version installed that no longer ship."""
+    keep = {p.parent if p.name == "SKILL.md" else p for p in kept}
+    stale = [p for sub in ("skills", "agents") for p in sorted((folder / sub).glob("factory-*")) if p not in keep]
+    for p in stale:
+        shutil.rmtree(p) if p.is_dir() else p.unlink()
+    return stale
+
+
 def install(lc: LoadedConfig, target: Target) -> list[Path]:
     """Skills and subagents go to the user's home (~/.claude, ~/.cursor): nothing is written into the repo."""
     home = agent_home()
     written: list[Path] = []
     if target == "claude":
-        for name in skill_names():  # Cursor also loads ~/.claude/skills, so one copy serves both
-            p = home / ".claude" / "skills" / ("factory" if name == "factory" else f"factory-{name}") / "SKILL.md"
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(_front_matter(name, skill_text(name)))
-            written.append(p)
+        written += _skills(home / ".claude" / "skills")  # Cursor also loads ~/.claude/skills: one copy serves both
         written += _subagents(lc, "claude", home / ".claude" / "agents")
+        prune(home / ".claude", written)
         written.append(_allow_state_home())
         if servers := mcp_json(lc, "claude")["mcpServers"]:
             if has("claude"):
                 _register_claude_mcp(lc.root, servers)
             written.append(home / ".claude.json")
     else:
-        for name in skill_names():
-            p = home / ".cursor" / "skills" / ("factory" if name == "factory" else f"factory-{name}") / "SKILL.md"
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(_front_matter(name, skill_text(name)))
-            written.append(p)
+        written += _skills(home / ".cursor" / "skills")
         written += _subagents(lc, "cursor", home / ".cursor" / "agents")
+        prune(home / ".cursor", written)
         if mcp_json(lc, "cursor")["mcpServers"]:
             mcp = home / ".cursor" / "mcp.json"
             _merge_json(mcp, mcp_json(lc, "cursor"))

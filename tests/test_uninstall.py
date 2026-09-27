@@ -58,7 +58,7 @@ def test_keep_home_and_global_options(repo: Path) -> None:
     adapters.install(config.load(repo), "claude")
     assert remover.plan(repo, home=False).delete == []
     rm = remover.plan(repo, home=False, global_=True)
-    assert any(p.name == "factory" for p in rm.delete) and any(p.name == "factory-fix.md" for p in rm.delete)
+    assert any(p.name == "factory" for p in rm.delete) and any(p.name == "factory-spec.md" for p in rm.delete)
 
 
 def test_cli_dry_run_and_open_run_guard(repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch) -> None:

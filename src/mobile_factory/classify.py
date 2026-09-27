@@ -31,6 +31,9 @@ SIGNALS: dict[str, list[tuple[int, str]]] = {
     "new-app": [(3, r"\b(new app|from scratch|greenfield|build an? (\w+ )?app|create an? (\w+ )?app)\b")],
 }
 OVERRIDE = 4  # the text must beat the Jira type's workflow by this much to override it
+CODE = "light"  # every code ticket (bugfix, task, feature) runs the light workflow; the kind only names the branch
+KINDS = ("bugfix", "task", "feature")
+KIND_BY_TYPE = {"Bug": "bugfix", "Task": "task", "Story": "feature", "Improvement": "feature", "New Feature": "feature"}
 
 
 @dataclass
@@ -39,6 +42,7 @@ class Detection:
     source: str  # "jira" | "text" | "override"
     reason: str
     scores: dict[str, int]
+    kind: str = ""  # a code ticket: bugfix | task | feature
 
 
 def scores(text: str) -> dict[str, int]:
@@ -46,21 +50,31 @@ def scores(text: str) -> dict[str, int]:
     return {wf: sum(w for w, pat in sigs if re.search(pat, t)) for wf, sigs in SIGNALS.items()}
 
 
-def detect(jira_workflow: str, summary: str, description: str) -> Detection:
+def _kind(s: dict[str, int], jira_kind: str) -> str:
+    best, top = max(((k, s[k]) for k in KINDS), key=lambda kv: kv[1])
+    if not jira_kind:
+        return best if top else "bugfix"
+    return best if best != jira_kind and top - s[jira_kind] >= OVERRIDE else jira_kind
+
+
+def detect(jira_workflow: str, summary: str, description: str, jira_kind: str = "") -> Detection:
     """`jira_workflow` is what the Jira type maps to ('' when unknown). The text wins when it is clearly different."""
     s = scores(f"{summary}\n{description}")
-    best, top = max(s.items(), key=lambda kv: kv[1])
+    fam = {**{wf: v for wf, v in s.items() if wf not in KINDS}, CODE: max(s[k] for k in KINDS)}
+    best, top = max(fam.items(), key=lambda kv: kv[1])
+    kind = _kind(s, jira_kind)
+    why = kind if best == CODE else best
     if not jira_workflow:
         if top == 0:
-            return Detection("bugfix", "text", "no type and no clear signal: treated as a bug fix", s)
+            return Detection(CODE, "text", "no type and no clear signal: treated as a bug fix", s, kind)
         return Detection(
-            best, "text", f"no ticket type; the text reads like {best} ({_why(best, summary, description)})", s
+            best, "text", f"no ticket type; the text reads like {why} ({_why(why, summary, description)})", s, kind
         )
-    if best != jira_workflow and top - s.get(jira_workflow, 0) >= OVERRIDE:
+    if best != jira_workflow and top - fam.get(jira_workflow, 0) >= OVERRIDE:
         return Detection(
-            best, "text", f"the text reads like {best}, not {jira_workflow} ({_why(best, summary, description)})", s
+            best, "text", f"the text reads like {why}, not {jira_workflow} ({_why(why, summary, description)})", s, kind
         )
-    return Detection(jira_workflow, "jira", "ticket type", s)
+    return Detection(jira_workflow, "jira", "ticket type", s, kind)
 
 
 def _why(wf: str, summary: str, description: str) -> str:

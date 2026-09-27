@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import secrets
+import time
 from collections.abc import Callable
 from functools import cached_property
 from importlib import resources
@@ -17,28 +18,17 @@ from . import autonomy, classify, events, usage, viz, workflow
 from .config import LoadedConfig, TrackerConfig
 from .errors import FactoryError, Refused, Stop
 from .gitops import Git
+from .globs import matches
 from .guardrail import context as review_ctx
 from .guardrail import diff as difflib
 from .guardrail import limits
 from .guardrail import rules as rl
 from .integrations import github, tracker
-from .outputs import (
-    EXAMPLES,
-    MODELS,
-    AcceptOut,
-    BaselineOut,
-    CustomOut,
-    FixOut,
-    PlanOut,
-    ReproOut,
-    ReviewOut,
-    SpecOut,
-    SplitOut,
-    TriageOut,
-    VerifyOut,
-)
+from .outputs import EXAMPLES, MODELS, CustomOut, SpecOut, SplitOut, WorkOut, fields
+from .platforms import maestro
 from .platforms import make as make_platform
-from .platforms.base import Platform, snapshot_diff
+from .platforms.android import ROUTES
+from .platforms.base import Platform, files_hash, snapshot_diff
 from .proc import run
 from .state import GateRecord, RunState, RunStore, new_run_id
 
@@ -46,15 +36,18 @@ ATTRIBUTION = re.compile(r"claude|chatgpt|copilot|cursor|generated (with|by)|co-
 
 
 MAX_QUESTION_ROUNDS = 3
-SPLIT, ONE_PR = "Split it into sub-tasks (stops here)", "Do it as one PR anyway"
+REOPENABLE = ("gate-needs-work", "failed")  # stopped runs `factory resume` restarts at the step they stopped on
+NEVER_STAGE = ["gradle.properties", "variants/*.properties"]  # a developer's local client switch
+TEMP_MARKER = re.compile(r"(//|#|/\*|<!--)\s*TEMP\b")
+TESTS = "unit_tests"  # factory.yaml `steps: {unit_tests: true}` or `factory run --tests`: the work step adds unit tests
 
 
 class Ask(Exception):
     """The step needs the developer: questions to answer, or one choice to make."""
 
-    def __init__(self, reason: str, questions: list[str], choices: list[str] | None = None) -> None:
+    def __init__(self, reason: str, questions: list[str]) -> None:
         super().__init__(reason)
-        self.reason, self.questions, self.choices = reason, questions, choices or []
+        self.reason, self.questions = reason, questions
 
 
 class Retry(Exception):
@@ -88,6 +81,7 @@ class Engine:
         if not isinstance(v := viz.make(self.cfg.viz), viz.NullVisualizer):
             sinks.append(viz.event_sink(v, lc.root))
         self.bus = events.EventBus(lc.state_dir / "events.jsonl", sinks)
+        self.notify: Callable[[str], None] = lambda _msg: None  # progress lines for slow automatic steps (CLI sets it)
 
     # ---------- lifecycle ----------
 
@@ -99,12 +93,16 @@ class Engine:
         ceiling: int | None = None,
         base: str | None = None,
         workflow_name: str | None = None,
+        *,
+        enable: list[str] | None = None,
+        direction: str = "",
     ) -> Engine:
         store = RunStore(lc.runs_dir)
-        for other in store.all():
-            if other.ticket == ticket and not other.finished:
-                raise FactoryError(f"{ticket} already has an open run {other.id}: `factory resume` or `factory abort`")
-        wf = workflow.get(workflow_name or _route_ticket(lc, ticket), lc.root)
+        earlier = [r for r in store.all() if r.ticket == ticket]
+        if open_run := next((r for r in earlier if not r.finished), None):
+            raise FactoryError(f"{ticket} already has an open run {open_run.id}: `factory resume` or `factory abort`")
+        found = _route_ticket(lc, ticket)
+        wf = workflow.get(workflow_name or found.workflow, lc.root)
         check_workflow(wf)
         nodes = wf.steps
         st = RunState(
@@ -113,20 +111,96 @@ class Engine:
             created_at=events.now(),
             updated_at=events.now(),
             pipeline=wf.name,
+            kind=found.kind,
             workflow_source="override" if workflow_name else "",
             workflow_reason="chosen with --workflow" if workflow_name else "",
             node=nodes[0].name,
             ceiling=min(wf.max_level, lc.cfg.autonomy.ceiling if ceiling is None else ceiling),
             base=base or ("" if lc.cfg.project.base_branch == "ask" else lc.cfg.project.base_branch),
+            enabled=list(enable or []),
         )
         eng = cls(lc, st)
         eng.save()
+        if earlier:
+            eng._carry_over(earlier[-1])
+        if direction.strip():
+            eng.direct(direction)
         eng.bus.emit(events.RUN_STARTED, st.id, ticket=ticket, ceiling=st.ceiling)
         return eng
 
     @classmethod
     def load(cls, lc: LoadedConfig, run_id: str | None = None) -> Engine:
         return cls(lc, RunStore(lc.runs_dir).load(run_id))
+
+    def _carry_over(self, prev: RunState) -> None:
+        """What an earlier run of the ticket learned (why it stopped, questions and answers, its plan) feeds the plan."""
+        old = self.store.path(prev.id)
+        try:
+            plan_step = workflow.get(prev.pipeline, self.lc.root).artifact("plan")
+        except FactoryError:
+            plan_step = ""
+        plan = prev.outputs.get(plan_step, {})
+        parts = [f"# Earlier run {prev.id}: {prev.status} {prev.outcome}".rstrip()]
+        if prev.stop_reason:
+            parts += ["", f"Stop reason: {prev.stop_reason}"]
+        for name, title in (
+            ("stop-reason.md", "Stop reason (file)"),
+            ("questions.md", "Questions"),
+            ("answers.md", "Answers"),
+        ):
+            if (f := old / name).is_file():
+                parts += ["", f"## {title}", f.read_text().strip()]
+        if plan:
+            parts += ["", f"## Its plan ({plan_step})", json.dumps(plan, indent=2)]
+        ctx = self.dir / "context"
+        ctx.mkdir(parents=True, exist_ok=True)
+        (ctx / "previous.md").write_text("\n".join(parts) + "\n")
+        if (old / "answers.md").is_file():
+            self.answers_file.write_text((old / "answers.md").read_text())
+
+    @property
+    def direction_file(self) -> Path:
+        return self.dir / "direction.md"
+
+    def direct(self, text: str) -> None:
+        """The developer's direction, appended with a timestamp; every later agent step gets it as a hint."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with self.direction_file.open("a") as fh:
+            fh.write(f"## {events.now()}\n{text.strip()}\n\n")
+
+    def direction(self) -> str:
+        """The latest direction's first line, for the run view."""
+        if not self.direction_file.is_file():
+            return ""
+        entries = [ln for ln in self.direction_file.read_text().splitlines() if ln.strip() and not ln.startswith("## ")]
+        return entries[-1] if entries else ""
+
+    def reopen(self) -> None:
+        """A run stopped by review or a failed step starts again at the step it stopped on."""
+        if self.st.status != "stopped" or self.st.outcome not in REOPENABLE:
+            raise FactoryError(f"run {self.st.id} is {self.st.status} ({self.st.outcome}); only {REOPENABLE} reopen")
+        self.st.status, self.st.outcome, self.st.stop_reason = "running", "", ""
+        self._start(self.st.node, "reopened")
+
+    def enabled(self, node: Node) -> bool:
+        """Optional steps (`optional: true`) run only when factory.yaml `steps.<name>` or the run turns them on."""
+        return not node.params.get("optional") or self.cfg.steps.get(node.name, False) or node.name in self.st.enabled
+
+    def _start(self, name: str, title: str) -> None:
+        self.st.started[name] = time.time()
+        self.bus.emit(events.NODE_STARTED, self.st.id, node=name, title=title)
+
+    def _took(self, name: str) -> int:
+        """Milliseconds since the step's current attempt started (0 when it never started: skipped)."""
+        t0 = self.st.started.pop(name, None)
+        return int((time.time() - t0) * 1000) if t0 else 0
+
+    def flow(self, step: str) -> Path:
+        """The Maestro flow recorded while an agent drove the device in `step`."""
+        return self.dir / "flows" / f"{step}.yaml"
+
+    def skipped(self, name: str) -> bool:
+        return bool(self.out(name).get("skipped"))
 
     def save(self) -> None:
         self.store.save(self.st)
@@ -193,14 +267,21 @@ class Engine:
                     self._complete_node()
                     continue
                 node = self.node()
+                if not self.enabled(node):
+                    self.st.outputs[node.name] = {"skipped": True}
+                    self._complete_node(skipped=True)
+                    continue
                 if node.kind == "agent":
                     if self.st.status != "waiting_agent":
                         self.st.status = "waiting_agent"
-                        self.bus.emit(events.NODE_STARTED, self.st.id, node=node.name, title=node.title)
+                        self._start(node.name, node.title)
                         self.bus.emit(events.AGENT_WAITING, self.st.id, node=node.name)
                     break
-                self.bus.emit(events.NODE_STARTED, self.st.id, node=node.name, title=node.title)
+                self._start(node.name, node.title)
+                self.notify(f"▸ {node.title}…")
+                t0 = time.monotonic()
                 result = AUTO[node.type](self)
+                self.notify(f"✓ {node.title} ({time.monotonic() - t0:.0f}s)")
                 if result is not None:
                     self.st.outputs[node.name] = result
                 self._after_node(node)
@@ -222,12 +303,15 @@ class Engine:
         try:
             parsed = MODELS[node.type].model_validate(data)
         except ValidationError as e:
-            raise FactoryError(f"{node_name} output invalid:\n{e}\nSchema: `factory schema {node_name}`") from e
+            raise FactoryError(f"{node_name} output invalid:\n{e}\nFields: {fields(MODELS[node.type])}") from e
+        self._keep_version(node_name, data)
         try:
             jump = POST[node.type](self, parsed)
             self.st.outputs[node_name] = parsed.model_dump()
             if jump:
-                self.bus.emit(events.NODE_COMPLETED, self.st.id, node=node_name, next=jump)
+                self.bus.emit(
+                    events.NODE_COMPLETED, self.st.id, node=node_name, next=jump, duration_ms=self._took(node_name)
+                )
                 self.goto(jump)
             else:
                 self._after_node(node)
@@ -244,6 +328,13 @@ class Engine:
         self.save()
         return self.advance()
 
+    def _keep_version(self, step: str, data: dict[str, Any]) -> None:
+        """Every submitted output stays: <step>.json, <step>.2.json, … under submitted/."""
+        d = self.dir / "submitted"
+        d.mkdir(parents=True, exist_ok=True)
+        n = len(list(d.glob(f"{step}.json"))) + len(list(d.glob(f"{step}.[0-9]*.json")))
+        (d / (f"{step}.json" if not n else f"{step}.{n + 1}.json")).write_text(json.dumps(data, indent=2))
+
     # ---------- questions for the developer ----------
 
     @property
@@ -257,19 +348,17 @@ class Engine:
             return
         self.st.question_rounds += 1
         self.st.status = "waiting_answers"
-        self.st.outputs["_ask"] = {"step": step, "reason": a.reason, "questions": a.questions, "choices": a.choices}
+        self.st.outputs["_ask"] = {"step": step, "reason": a.reason, "questions": a.questions}
         (self.dir / "questions.md").write_text("\n".join(f"- {q}" for q in a.questions) + "\n")
-        self.bus.emit(events.GATE_WAITING, self.st.id, gate="questions", ticket=self.st.ticket, summary=a.reason[:200])
+        self.bus.emit(
+            events.GATE_WAITING, self.st.id, gate="questions", node=step, ticket=self.st.ticket, summary=a.reason[:200]
+        )
 
     def answer(self, answers: list[str]) -> RunState:
         """The developer's answers (same order as the questions; '' = not sure). The step runs again with them."""
         ask = self.out("_ask")
         if self.st.status != "waiting_answers" or not ask:
             raise FactoryError("no questions are waiting")
-        if ask.get("choices") and answers and answers[0] == SPLIT:
-            self.finish("stopped", "too-big", ask["reason"])
-            self.save()
-            return self.st
         with self.answers_file.open("a") as fh:
             fh.write(f"## Round {self.st.question_rounds} ({ask['step']})\n")
             for q, ans in zip(ask["questions"], answers, strict=False):
@@ -277,7 +366,7 @@ class Engine:
             fh.write("\n")
         self.st.outputs.pop("_ask", None)
         self.st.status = "waiting_agent"
-        self.bus.emit(events.GATE_DECIDED, self.st.id, gate="questions", decision="answered")
+        self.bus.emit(events.GATE_DECIDED, self.st.id, gate="questions", node=ask["step"], decision="answered")
         self.save()
         return self.st
 
@@ -290,6 +379,7 @@ class Engine:
                 events.GATE_WAITING,
                 self.st.id,
                 gate=node.gate,
+                node=node.name,
                 ticket=self.st.ticket,
                 risk=self.st.risk.score if self.st.risk else None,
                 level=self.st.level,
@@ -300,22 +390,26 @@ class Engine:
             self.st.gates[node.gate] = GateRecord(
                 gate=node.gate, decision="auto", at=events.now(), sha=self._gate_sha(node.gate)
             )
-            self.bus.emit(events.GATE_DECIDED, self.st.id, gate=node.gate, decision="auto", level=self.st.level)
+            self.bus.emit(
+                events.GATE_DECIDED, self.st.id, gate=node.gate, node=node.name, decision="auto", level=self.st.level
+            )
         self._complete_node()
 
-    def _complete_node(self) -> None:
-        self.bus.emit(events.NODE_COMPLETED, self.st.id, node=self.st.node)
+    def _complete_node(self, **data: Any) -> None:
+        self.bus.emit(
+            events.NODE_COMPLETED, self.st.id, node=self.st.node, duration_ms=self._took(self.st.node), **data
+        )
         if self.st.node == self.nodes[-1].name:
             self.finish("done", self.st.outcome or self.wf.outcome, "")
         else:
             self._next_node()
 
     def _gate_needed(self, gate: str) -> bool:
-        if gate == "review" and any(
-            f.get("outcome") == "dismissed" and f.get("severity") in ("blocker", "major")
+        if gate == "pr" and any(
+            f.get("outcome") in ("dismissed", "open", "not applied") and f.get("severity") in ("blocker", "major")
             for f in self.out("review").get("findings", [])
         ):
-            return True  # a dismissed blocker/major always gets human eyes
+            return True  # a dismissed or open blocker/major always gets human eyes
         return not autonomy.gate_is_automatic(self.cfg.gates[gate], self.st.level)
 
     def _gate_sha(self, gate: str) -> str:
@@ -328,7 +422,7 @@ class Engine:
         if approve and code != rec.code:
             raise Refused(f"confirmation code mismatch for gate {gate}")
         rec.decision, rec.by, rec.at, rec.reason = ("approved" if approve else "rejected"), by, events.now(), reason
-        self.bus.emit(events.GATE_DECIDED, self.st.id, gate=gate, decision=rec.decision, by=by)
+        self.bus.emit(events.GATE_DECIDED, self.st.id, gate=gate, node=self.st.node, decision=rec.decision, by=by)
         self.save()
         return self.advance()
 
@@ -340,7 +434,14 @@ class Engine:
             )
             return
         self.st.fix_attempts += 1
-        self.bus.emit(events.NODE_FAILED, self.st.id, node=self.st.node, reason=reason, attempt=self.st.fix_attempts)
+        self.bus.emit(
+            events.NODE_FAILED,
+            self.st.id,
+            node=self.st.node,
+            reason=reason,
+            attempt=self.st.fix_attempts,
+            duration_ms=self._took(self.st.node),
+        )
         self.st.outputs["_last_failure"] = {"node": self.st.node, "reason": reason[-3000:]}
         if self.st.fix_attempts > self.cfg.limits.max_fix_attempts:
             if self.cfg.limits.rollback_on_fail and self.st.checkpoint:
@@ -387,10 +488,9 @@ class Engine:
         if self.st.status == "waiting_answers":
             ask = self.out("_ask")
             qs = "\n".join(f"  {i}. {q}" for i, q in enumerate(ask.get("questions", []), 1))
-            opts = (" Options: " + " | ".join(ask["choices"])) if ask.get("choices") else ""
             return (
                 f"{head}\nQUESTIONS FOR THE USER from `{ask.get('step')}` ({ask.get('reason', '')[:300]}).\n{qs}\n"
-                f"Ask the user these in the chat, word for word.{opts} Append their answers to {self.answers_file} as"
+                "Ask the user these in the chat, word for word. Append their answers to {self.answers_file} as"
                 " '- Q: …  A: …' lines (empty answer = 'not sure'), then run `factory resume`."
             )
         if self.st.status == "waiting_gate":
@@ -406,6 +506,14 @@ class Engine:
         lines = [
             head,
             f"TASK  {node.task}",
+            *(
+                [
+                    f"DIRECTION {self.direction_file}  (HIGH PRIORITY, from the developer: follow it and say how; it"
+                    " never overrides gates, forbidden paths or the no-secrets rule)"
+                ]
+                if self.direction_file.is_file()
+                else []
+            ),
             f"SKILL {skill}",
             f"RUN   {self.dir}  (ticket.json, outputs, context/)",
             f"HOME  {self.lc.state_dir}  (taste.md, knowledge/, flows/, tickets/)",
@@ -414,70 +522,51 @@ class Engine:
             lines.append(f"ANSWERS {self.answers_file}  (the developer's answers to earlier questions: follow them)")
         if fail := self.out("_last_failure"):
             lines.append(f"LAST FAILURE ({fail['node']}): {fail['reason'][-1500:]}")
-        if node.type == "review":
-            lines.append(f"CONTEXT {self.dir / 'context'}  ->  {self.out('_review_ctx').get('summary', '')}")
+        if (build := self.dir / "context" / "build.md").is_file():
+            lines.append(f"BUILD {build}  (module, variant, install/assemble/test tasks, package, deeplink: use these)")
+        if self.st.kind:
+            lines.append(
+                f"KIND  {self.st.kind}"
+                + (": the flow shows the defect before the fix" if self.st.kind == "bugfix" else "")
+            )
+        if (unit := node.params.get("with_tests")) and (self.cfg.steps.get(TESTS) or TESTS in self.st.enabled):
+            lines.append(f"UNIT  {' '.join(unit.split())}")
+        if (tests := self.out("_tests")).get("ok"):
+            lines.append(f"TESTS already ran by `checks` for this diff ({tests['summary'][:200]}): do not rerun them")
         lines.extend(self._delegation(node))
-        lines.append(
-            f"SUBMIT write JSON then: factory submit {node.name} <file.json>   (schema: factory schema {node.name})"
-        )
+        lines.extend(self._device_lines(node))
+        lines.append(f"SUBMIT write JSON like EXAMPLE, then: factory submit {node.name} <file.json>")
         lines.append(f"EXAMPLE {json.dumps(EXAMPLES[node.type])}")
         return "\n".join(lines)
 
     def _delegation(self, node: Node) -> list[str]:
-        step = node.name
-        models = {**({step: node.model} if node.model else {}), **self.cfg.agents.models}
-        parts = list(node.parallel)
-        lines = []
-        done = self._parts_done(parts)
-        if parts and done:
-            lines.append(
-                "PARTS    already done alongside an earlier step, for this exact diff: " + ", ".join(map(str, done))
-            )
-            lines.append(f"THEN     factory-{step} merges those files, dedupes, applies fixes and writes the output")
-        elif parts:
-            out = self.dir / "context"
-            how = "start ALL of these in one message (parallel)" if self.cfg.agents.parallel else "run these in turn"
-            lines.append(f"PARALLEL {how}; each writes findings JSON (schema: factory schema review), read-only:")
-            lines += [
-                f"  factory-{p} ({models.get(p, 'inherit')})  ->  {out / f'{p}.json'}"
-                f"  (description: {p.removeprefix('review-')})"
-                for p in parts
-            ]
-            lines.append(f"THEN     factory-{step} merges those files, dedupes, applies fixes and writes the output")
-        lines.append(
-            f"AGENT    delegate to the `factory-{step}` subagent ({models.get(step, 'inherit')}); "
-            "if your tool has no subagents, do it yourself"
-        )
-        for helper in node.alongside if self.cfg.agents.parallel else ():
-            lines.append(
-                f"ALONGSIDE start `factory-{helper}` ({models.get(helper, 'inherit')}) in the SAME message, read-only  "
-                f"->  {self.dir / 'context' / f'{helper}.json'}  (description: {helper})"
-            )
-        if node.scout:
-            scout = self.dir / "context" / f"{step}-scout.md"
-            if scout.is_file():
-                lines.append(f"HINT     {scout}  (scout findings: start there, search again only for what it lacks)")
-            else:
-                lines.insert(
-                    0,
-                    f"SCOUT    first start `factory-scout` ({models.get('scout', 'haiku')}) with what `{step}` needs to "
-                    f"know (greps, git history, gradle/adb output)  ->  {scout}  (description: scout {step}); "
-                    "then delegate the step",
-                )
-        if step == self.wf.artifact("change"):
-            for name, what in (("locate", "code map"), ("history", "the code's past: regressions, earlier fixes")):
-                if (hint := self.dir / "context" / f"{name}.json").is_file():
-                    lines.append(f"HINT     {hint}  ({what}: start there, confirm before editing)")
-        return lines
+        prev = self.dir / "context" / "previous.md"
+        lines = [f"HINT     {prev}  (an earlier run of this ticket: why it stopped, Q&A, its plan: build on it)"]
+        lines = lines if prev.is_file() and node.name == self.wf.artifact("plan") else []
+        if node.params.get("solo"):
+            return [*lines, "AGENT    do this step yourself in this session: no subagents"]
+        model = node.model or self.cfg.agents.models.get(node.name, "inherit")
+        return [
+            *lines,
+            f"AGENT    delegate to the `factory-{node.skill}` subagent ({model}); "
+            "if your tool has no subagents, do it yourself",
+        ]
 
-    def _parts_done(self, parts: list[str]) -> list[Path]:
-        """Review part files written for the current diff (newer than diff.patch); else [] and they run again."""
-        ctx = self.dir / "context"
-        files = [ctx / f"{p}.json" for p in parts]
-        diff = ctx / "diff.patch"
-        if not parts or not diff.is_file() or not all(f.is_file() for f in files):
+    def library(self) -> Path:
+        return self.lc.path(self.cfg.android.flows_dir) / maestro.LIBRARY
+
+    def _device_lines(self, node: Node) -> list[str]:
+        """The proving step writes one Maestro flow with a `# criterion N:` section per criterion and runs it."""
+        if node.name != self.wf.artifact("after"):
             return []
-        return files if all(f.stat().st_mtime >= diff.stat().st_mtime for f in files) else []
+        flow = self.flow(node.name)
+        shots = self.dir / "snapshots" / "after"
+        return [
+            f"FLOW     write {flow}: one `# criterion N: <text>` section per criterion, assertVisible/assertNotVisible",
+            *(f"START    from {f}" for f in maestro.matching(self.library(), self.art("plan").get("screens", []))),
+            f"ROUTES   grep {self.library().parent / ROUTES}",
+            f"RUN      cd {shots} && maestro --device <serial> test {flow}   (fix the flow and rerun, at most 3 rounds)",
+        ]
 
     def progress(self) -> str:
         names = [n.name for n in self.nodes]
@@ -493,21 +582,8 @@ class Engine:
     def gate_summary(self, gate: str) -> str:
         if gate == "plan":
             t = self.art("plan")
-            plan = "\n".join(f"  - {p}" for p in t.get("plan", []))
-            why = (
-                "Acceptance criteria:\n" + "\n".join(f"  - {c}" for c in t.get("acceptance_criteria", []))
-                if t.get("acceptance_criteria")
-                else f"Root cause guess: {t.get('root_cause_hypothesis', '')}"
-            )
-            return f"Plan for {self.st.ticket}: {t.get('summary', '')}\n{why}\n{plan}\n\n{self.st.risk.explain() if self.st.risk else ''}"
-        if gate == "repro":
-            r = self.art("before")
-            return f"Reproduced: {r.get('reproduced')} (confidence {r.get('confidence')})\nSteps: {'; '.join(r.get('steps', []))}\nSnapshots: {self.dir / 'snapshots' / 'before'}"
-        if gate == "diff":
-            stat = self.git("diff", "--stat", self.st.checkpoint, check=False) if self.st.checkpoint else ""
-            return f"Change: {self.art('change').get('summary', '')}\n{stat}\n\n{self.st.risk.explain() if self.st.risk else ''}"
-        if gate == "review":
-            return rl.table([rl.Finding.model_validate(f) for f in self.out("review").get("findings", [])])
+            crit = "\n".join(f"  - {c}" for c in t.get("acceptance_criteria", []))
+            return f"Plan for {self.st.ticket}: {t.get('summary', '')}\nAcceptance criteria:\n{crit}\n\n{self.st.risk.explain() if self.st.risk else ''}"
         if gate == "pr":
             p = self.out("pr_preview")
             extra = (
@@ -525,7 +601,26 @@ class Engine:
 # ---------- automatic nodes ----------
 
 
+def _build_context(e: Engine) -> None:
+    """Resolved once per run (config, else discovered and cached per project + variant): agents never guess it."""
+    try:
+        ctx = e.platform.build_context()
+    except FactoryError as err:
+        ctx = {"error": str(err)[:300]}
+    e.st.outputs["_build"] = ctx
+    if ctx:
+        f = e.dir / "context" / "build.md"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        rows = "\n".join(f"{k:<10} {v or '(not set)'}" for k, v in ctx.items())
+        other = f"`:<module>:{ctx['unit_tests'].rsplit(':', 1)[-1]}`" if ctx.get("unit_tests") else ""
+        f.write_text(
+            f"# Build context\n\n{rows}\n\nUse these names as they are: never guess modules or run `gradlew tasks`."
+            + (f"\nUnit tests of another module: {other}.\n" if other else "\n")
+        )
+
+
 def _preflight(e: Engine) -> dict[str, Any]:
+    _build_context(e)
     if e.node().params.get("git") is False:  # no code changes in this workflow: no branch, tree or push needed
         return {"git": False}
     if dirty := e.git.dirty():
@@ -540,9 +635,9 @@ def _preflight(e: Engine) -> dict[str, Any]:
 
 def route(tc: TrackerConfig, ticket_type: str, parent_type: str = "", root: Path | None = None) -> str:
     """The workflow for a ticket type (tracker.pipelines); 'parent' means the parent's workflow (sub-tasks);
-    file tickets without a type are bug fixes."""
+    file tickets without a type are code tickets."""
     if not ticket_type:
-        return "bugfix"
+        return classify.CODE
     known = workflow.all_workflows(root)
     pipe = tc.pipelines.get(ticket_type)
     if pipe == "parent":
@@ -560,32 +655,34 @@ def route(tc: TrackerConfig, ticket_type: str, parent_type: str = "", root: Path
 
 
 def detect_workflow(tc: TrackerConfig, t: tracker.Ticket, root: Path | None = None) -> classify.Detection:
-    """The Jira type's workflow unless the ticket's text clearly says otherwise (tracker.detect)."""
+    """The Jira type's workflow unless the ticket's text clearly says otherwise (tracker.detect); code tickets also
+    get their kind (bugfix, task, feature) for the branch and the work step."""
     try:
         by_type = route(tc, t.type, t.parent_type, root) if t.type else ""
     except Stop:
         by_type = ""  # unmapped type: let the text decide
+    kind = classify.KIND_BY_TYPE.get(t.parent_type if tc.pipelines.get(t.type) == "parent" else t.type, "")
     if not tc.detect:
         if not by_type and t.type:
             route(tc, t.type, t.parent_type, root)  # raises the clear "no workflow" reason
-        return classify.Detection(by_type or "bugfix", "jira", "ticket type", {})
+        return classify.Detection(by_type or classify.CODE, "jira", "ticket type", {}, kind or "bugfix")
     family = workflow.get(by_type, root).family if by_type else ""
-    found = classify.detect(family if by_type else "", t.summary, t.description)
+    found = classify.detect(family, t.summary, t.description, kind)
     if by_type and found.workflow == family:  # the text agrees with the type: keep the mapped (maybe custom) one
         found.workflow = by_type
     elif by_type and not family:  # a workflow of your own with no built-in family: the type decides
-        found = classify.Detection(by_type, "jira", "ticket type", found.scores)
+        found = classify.Detection(by_type, "jira", "ticket type", found.scores, found.kind)
     if t.type and not by_type and not any(found.scores.values()):
         route(tc, t.type, t.parent_type, root)  # an unknown type and no signal in the text: stop with the reason
     return found
 
 
-def _route_ticket(lc: LoadedConfig, key: str) -> str:
+def _route_ticket(lc: LoadedConfig, key: str) -> classify.Detection:
     """Pick the workflow before the run starts, so its first steps are the right ones; intake re-checks it."""
     try:
-        return detect_workflow(lc.cfg.tracker, tracker.make(lc.cfg.tracker, lc.root).get(key), lc.root).workflow
+        return detect_workflow(lc.cfg.tracker, tracker.make(lc.cfg.tracker, lc.root).get(key), lc.root)
     except (FactoryError, Stop):
-        return "bugfix"  # intake reports the real problem
+        return classify.Detection(classify.CODE, "jira", "", {}, "bugfix")  # intake reports the real problem
 
 
 def _intake(e: Engine) -> dict[str, Any]:
@@ -598,6 +695,7 @@ def _intake(e: Engine) -> dict[str, Any]:
         raise Stop("ineligible", f"{t.key} needs {found.workflow} ({found.reason}) but the run is {e.st.pipeline}")
     if e.st.workflow_source != "override":
         e.st.workflow_source, e.st.workflow_reason = found.source, found.reason
+    e.st.kind = found.kind
     if blocked := t.blocked_labels(tc.block_labels):
         raise Stop("ineligible", f"label {', '.join(blocked)}")
     (e.dir / "ticket.json").write_text(t.model_dump_json(indent=2))
@@ -614,7 +712,8 @@ def _intake(e: Engine) -> dict[str, Any]:
 def _branch(e: Engine) -> dict[str, Any]:
     p = e.cfg.project
     pattern = p.branch_pattern_by_type.get(e.out("intake").get("type", ""), e.wf.branch)
-    name = pattern.format(key=e.st.ticket, slug=_slug(e.art("plan").get("summary", "")))
+    title = e.art("plan").get("summary") or e.out("intake").get("summary", "")  # light: no plan yet, the ticket title
+    name = pattern.format(key=e.st.ticket, slug=_slug(title), kind=e.st.kind or "work")
     e.git.create_branch(name, f"{e.cfg.vcs.remote}/{e.st.base}")
     e.st.branch = name
     e.st.checkpoint = e.git.head()
@@ -624,21 +723,15 @@ def _branch(e: Engine) -> dict[str, Any]:
     return {"branch": name, "checkpoint": e.st.checkpoint, "tracker": msg}
 
 
-def _tested(e: Engine, rep: dict[str, Any], ver: dict[str, Any], snaps: str) -> str:
-    """Plain words a reviewer would write: where it was reproduced, what now works, what else was checked."""
-    steps = "; ".join(rep.get("steps", []))
-    if ver.get("criteria"):
-        lines = [f"- Checked on {e.cfg.android.variant} (emulator): {steps}" if steps else ""]
-        lines += [f"- {c['criterion']}: {c['evidence']}" for c in ver.get("criteria", []) if c.get("met")]
-        lines += [f"  - {ln[2:]}" for ln in snaps.splitlines() if ln.startswith("- ")]
-        return "\n".join(ln for ln in lines if ln)
-    lines = [f"- Reproduced on {e.cfg.android.variant} (emulator): {steps}" if steps else ""]
-    if ver.get("defect_fixed"):
-        lines.append("- After the fix the issue no longer occurs")
-    if ver.get("adjacent_unchanged"):
-        lines.append("- Related screens behave as before")
+def _criteria(ver: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(ver.get("acceptance_criteria") or [])
+
+
+def _tested(e: Engine, ver: dict[str, Any], snaps: str) -> str:
+    """Plain words a reviewer would write: what now works, with its evidence, and what the screenshots show."""
+    lines = [f"- {c['criterion']}: {c['evidence']}" for c in _criteria(ver) if c.get("met")]
     lines += [f"  - {ln[2:]}" for ln in snaps.splitlines() if ln.startswith("- ")]
-    return "\n".join(ln for ln in lines if ln)
+    return "\n".join(lines)
 
 
 def _changed(e: Engine) -> tuple[list[str], list[difflib.FileDiff]]:
@@ -646,52 +739,81 @@ def _changed(e: Engine) -> tuple[list[str], list[difflib.FileDiff]]:
     return files, difflib.parse(e.git.diff(e.st.checkpoint, files))
 
 
-def _checks(e: Engine) -> dict[str, Any]:
+def _lint_tests(e: Engine) -> tuple[str, str]:
+    """Lint + unit tests of the touched modules and the extra guardrail commands: (summary, failure or '')."""
     files, _ = _changed(e)
+    sources = files_hash(e.lc.root, files, "\n".join(e.cfg.guardrail.commands))
+    if (prev := e.out("_tests")).get("hash") == sources and prev.get("ok"):  # a pass on the same sources stays a pass
+        return f"{prev['summary']} (reused: sources unchanged since it ran)", ""
+    summary, failed = _run_lint_tests(e, files)
+    e.st.outputs["_tests"] = {"hash": sources, "ok": not failed, "summary": summary}
+    return summary, failed
+
+
+def _run_lint_tests(e: Engine, files: list[str]) -> tuple[str, str]:
     logs = e.dir / "logs"
     res = e.platform.checks(files, logs)
     if not res.ok:
-        raise Retry(f"checks failed ({res.log}):\n{res.summary}")
+        return res.summary, f"checks failed ({res.log}):\n{res.summary}"
     for cmd in e.cfg.guardrail.commands:
         r = run(["sh", "-c", cmd], e.lc.root, log=logs / f"cmd-{_slug(cmd)}.log")
         if not r.ok:
-            raise Retry(f"`{cmd}` failed:\n{(r.out + r.err)[-1500:]}")
-    build = e.platform.build_install(logs)
+            return res.summary, f"`{cmd}` failed:\n{(r.out + r.err)[-1500:]}"
+    return res.summary, ""
+
+
+def _checks(e: Engine) -> dict[str, Any]:
+    summary, failed = _lint_tests(e)
+    if failed:
+        raise Retry(failed)
+    build = e.platform.build_install(e.dir / "logs")  # gradle install = `adb install -r`: app data and sign-in stay
     if not build.ok:
         raise Retry(f"build failed ({build.log}):\n{build.summary}")
-    _prepare_review(e)  # reviewers can start alongside verify
-    return {"checks": res.summary, "build": build.summary.splitlines()[0]}
+    return {"checks": summary, "build": " · ".join(build.summary.splitlines()[:2])}
 
 
-def _prepare_review(e: Engine) -> None:
-    """The guardrail context for the current diff: built after checks so reviewers can start alongside verify.
-    An unchanged diff is left alone, so the part files written for it (newer than diff.patch) stay valid."""
-    patch = e.git.diff(e.st.checkpoint)
-    sha = hashlib.sha256(patch.encode()).hexdigest()
-    if e.out("_review_ctx").get("patch_sha") == sha and (e.dir / "context" / "diff.patch").is_file():
-        return
-    ctx = review_ctx.build(e.lc, patch, e.dir / "context")
-    e.st.outputs["_review_ctx"] = {
-        "summary": ctx.summary(),
-        "detector": [f.model_dump() for f in ctx.detector_findings],
-        "patch_sha": sha,
-    }
+def _detectors(e: Engine) -> dict[str, Any]:
+    """Review: the deterministic detectors only, no agents; every finding (blockers too) is a PR review note."""
+    ctx = review_ctx.build(e.lc, e.git.diff(e.st.checkpoint), e.dir / "context")
+    e.st.outputs["_review_ctx"] = {"summary": ctx.summary(), "files": e.git.changed_files(e.st.checkpoint)}
+    return {"findings": [{**f.model_dump(), "outcome": "open"} for f in ctx.detector_findings]}
+
+
+def _size(e: Engine, files: list[str]) -> None:
+    """Risk counts the product code only: test files add no file or line points; new untracked files count."""
+    tests = e.cfg.project.test_dirs
+    code = [f for f in files if not any(d in f"/{f}" for d in tests)]
+    e.st.signals.actual_files = len(code)
+    e.st.signals.lines_changed = e.git.numstat(e.st.checkpoint, code) if code else 0
 
 
 def _commit(e: Engine) -> dict[str, Any]:
-    files = e.git.changed_files(e.st.checkpoint)
+    changed = e.git.changed_files(e.st.checkpoint)
+    reviewed = set(e.out("_review_ctx").get("files", changed))
+    untracked = set(e.git.untracked())
+    files = [f for f in changed if not matches(f, NEVER_STAGE) and (f not in untracked or f in reviewed)]
+    left = sorted(set(changed) - set(files))
+    added = [
+        ln for ln in e.git.diff(e.st.checkpoint, files).splitlines() if ln.startswith("+") and not ln.startswith("+++")
+    ]
+    if marked := [ln[1:].strip() for ln in added if TEMP_MARKER.search(ln)]:
+        raise FactoryError(
+            f"refusing to commit: TEMP marker in the change ({marked[0][:80]}): remove it, then `factory resume`"
+        )
     amend = e.git.commits_since(e.st.checkpoint) > 0
     subject = f"{e.st.ticket}: {e.art('change')['summary']}"
     sha = e.git.commit(files, subject, amend=amend)
-    e.st.signals.actual_files, e.st.signals.lines_changed = len(files), e.git.numstat(e.st.checkpoint)
-    e.reassess()  # guardrail rounds can grow the diff
-    _prepare_review(e)  # usually unchanged since checks: the parts done alongside verify still count
-    return {"sha": sha, "subject": subject, "amended": amend, "files": files}
+    e.notify(f"{'amended' if amend else 'committed'} {sha[:10]} {subject}: {', '.join(files)}")
+    if left:
+        e.notify(f"left out of the commit (client switch or not in the reviewed diff): {', '.join(left)}")
+    _size(e, files)
+    e.reassess()
+    return {"sha": sha, "subject": subject, "amended": amend, "files": files, "left_out": left}
 
 
 def _pr_preview(e: Engine) -> dict[str, Any]:
     ticket_url = e.out("intake").get("url", "")
-    fix, rep, ver = e.art("change"), e.art("before"), e.art("after")
+    fix, ver = e.art("change"), e.art("after")
     snaps = "\n".join(
         f"- {label}: {change.strip().splitlines()[0] if change.strip() else ''}"
         for label, change in snapshot_diff(e.dir / "snapshots")
@@ -703,20 +825,38 @@ def _pr_preview(e: Engine) -> dict[str, Any]:
         .read_text()
         .format(
             ticket_url=ticket_url or e.st.ticket,
-            root_cause=fix.get("root_cause", ""),
-            changes=fix.get("changes", ""),
+            changes=fix.get("changes") or fix.get("summary", ""),
             criteria="\n".join(
-                f"- [{'x' if c.get('met') else ' '}] {c.get('criterion', '')}" for c in ver.get("criteria", [])
+                f"- [{'x' if c.get('met') else ' '}] {c.get('criterion', '')}"
+                for c in _criteria(ver)
+                if not c.get("blocked")
             ),
-            tested=_tested(e, rep, ver, snaps),
+            tested=_tested(e, ver, snaps),
             notes=fix.get("notes", ""),
         )
-    )
+    ) + _notes(e)
     title = f"{e.st.ticket}: {fix['summary']}"
     _guard_publish(e, title, body)
     f = e.dir / "pr-body.md"
     f.write_text(body)
     return {"title": title, "file": str(f), "sha": preview_sha(title, body)}
+
+
+def _notes(e: Engine) -> str:
+    """What the draft PR must say out loud: blocked criteria and the detector findings."""
+    blocked = [c for c in _criteria(e.art("after")) if c.get("blocked")]
+    out = (
+        "\n## Blocked\n" + "\n".join(f"- {c['criterion']}: {c.get('reason', '')}" for c in blocked) + "\n"
+        if blocked
+        else ""
+    )
+    findings = [rl.Finding.model_validate(f) for f in e.out("review").get("findings", [])]
+    notes = [
+        f"- {f.severity}: {f.suggestion} ({f.file}{f':{f.line}' if f.line else ''}){f' - {f.reason}' if f.reason else ''}"
+        for f in findings
+        if f.outcome in ("open", "not applied")
+    ]
+    return out + ("\n## Open review notes\n" + "\n".join(notes) + "\n" if notes else "")
 
 
 def _guard_publish(e: Engine, title: str, body: str) -> None:
@@ -736,13 +876,8 @@ def _guard_publish(e: Engine, title: str, body: str) -> None:
         refuse("uncommitted changes")
     if e.git.commits_since(e.st.checkpoint) != 1:
         refuse("expected exactly one commit on top of the checkpoint")
-    if (
-        rl.verdict([rl.Finding.model_validate(f) for f in e.out("review").get("findings", [])])
-        != "READY FOR HUMAN REVIEW"
-    ):
-        refuse("guardrail verdict is not READY")
     if e.out("commit").get("sha") != e.git.head():
-        refuse("HEAD moved after the guardrail review")
+        refuse("HEAD moved after the commit step")
 
 
 def _publish(e: Engine) -> dict[str, Any]:
@@ -766,6 +901,9 @@ def _publish(e: Engine) -> dict[str, Any]:
 
 
 def _handoff(e: Engine) -> dict[str, Any]:
+    if (e.dir / "mock.pid").is_file():  # never leave the device on a mocking proxy
+        with contextlib.suppress(Exception):
+            e.platform.mock_off(e.dir)
     if e.wf.outcome != "pr":
         return {"outcome": e.st.outcome or e.wf.outcome, "run": str(e.dir)}
     e.st.outcome = "draft-pr" if e.cfg.vcs.draft else "pr"
@@ -826,6 +964,7 @@ AUTO: dict[str, Callable[[Engine], dict[str, Any] | None]] = {
     "intake": _intake,
     "branch": _branch,
     "checks": _checks,
+    "detectors": _detectors,
     "commit": _commit,
     "pr_preview": _pr_preview,
     "publish": _publish,
@@ -839,37 +978,8 @@ AUTO: dict[str, Callable[[Engine], dict[str, Any] | None]] = {
 # ---------- agent post-processing ----------
 
 
-def _post_triage(e: Engine, o: Any) -> str | None:
-    t: TriageOut = o
-    if t.verdict == "needs-info" and t.questions:
-        raise Ask(t.reason, t.questions)
-    if t.verdict != "eligible":
-        raise Stop(t.verdict, t.reason)
-    s = e.st.signals
-    s.category, s.estimated_files, s.public_api_change, s.risk_classes = (
-        t.category,
-        t.estimated_files,
-        t.public_api_change,
-        t.risk_classes,
-    )
-    e.reassess()
-    return None
-
-
-def _post_repro(e: Engine, o: Any) -> str | None:
-    r: ReproOut = o
-    missing = [lb for lb in r.snapshots if not (e.dir / "snapshots" / "before" / f"{lb}.txt").is_file()]
-    if missing:
-        raise FactoryError(f"snapshots not found for labels {missing}: capture with `factory snap before <label>`")
-    e.st.signals.reproduced, e.st.signals.repro_confidence = r.reproduced, r.confidence
-    if not r.reproduced and e.cfg.limits.require_repro:
-        raise Stop("not-reproduced", "could not reproduce; see the reproduce output")
-    e.reassess()
-    return None
-
-
-def _post_fix(e: Engine, o: Any) -> str | None:
-    f: FixOut = o
+def _check_change(e: Engine) -> None:
+    """The change stays inside the allowed paths; its size and modules feed the risk score."""
     files, diffs = _changed(e)
     if not files:
         raise FactoryError("no changes found since the checkpoint")
@@ -877,67 +987,26 @@ def _post_fix(e: Engine, o: Any) -> str | None:
     if not rep.ok:
         raise Stop("forbidden-path", "; ".join(rep.lines()))
     s = e.st.signals
-    s.actual_files, s.lines_changed, s.tests_added = len(files), e.git.numstat(e.st.checkpoint), f.tests_added
+    _size(e, files)
+    s.tests_added = any(d in f"/{f}" for f in files for d in e.cfg.project.test_dirs)
     s.modules_touched = len(e.platform.modules_for(files)) or 1
     e.st.outputs.pop("_last_failure", None)
     e.reassess()
-    return None
 
 
-def _post_verify(e: Engine, o: Any) -> str | None:
-    v: VerifyOut = o
-    missing = [lb for lb in v.snapshots if not (e.dir / "snapshots" / "after" / f"{lb}.txt").is_file()]
-    if missing:
-        raise FactoryError(f"snapshots not found for labels {missing}: capture with `factory snap after <label>`")
-    if not (v.defect_fixed and v.adjacent_unchanged):
-        raise Retry(
-            f"verification failed: defect_fixed={v.defect_fixed}, adjacent_unchanged={v.adjacent_unchanged}. {v.notes}"
-        )
-    return None
-
-
-def _post_plan(e: Engine, o: Any) -> str | None:
-    p: PlanOut = o
-    if p.verdict == "too-big":
-        (e.dir / "subtasks.md").write_text("\n".join(f"- {t}" for t in p.subtasks) + "\n")
-        raise Ask(p.reason, [f"It looks too big for one PR ({p.reason[:200]}). How should it go?"], [SPLIT, ONE_PR])
-    if p.verdict == "needs-info" and p.questions:
-        raise Ask(p.reason, p.questions)
-    if p.verdict != "eligible":
-        raise Stop(p.verdict, p.reason)
-    if not p.acceptance_criteria:
-        raise FactoryError("an eligible plan needs acceptance criteria: from the ticket, or drafted for approval")
-    s = e.st.signals
-    s.category, s.estimated_files, s.public_api_change, s.risk_classes = (
-        "feature",
-        p.estimated_files,
-        p.public_api_change,
-        p.risk_classes,
-    )
-    e.reassess()
-    return None
-
-
-def _post_baseline(e: Engine, o: Any) -> str | None:
-    b: BaselineOut = o
-    missing = [lb for lb in b.snapshots if not (e.dir / "snapshots" / "before" / f"{lb}.txt").is_file()]
-    if missing:
-        raise FactoryError(f"snapshots not found for labels {missing}: capture with `factory snap before <label>`")
-    return None
-
-
-def _post_accept(e: Engine, o: Any) -> str | None:
-    a: AcceptOut = o
-    missing = [lb for lb in a.snapshots if not (e.dir / "snapshots" / "after" / f"{lb}.txt").is_file()]
-    if missing:
-        raise FactoryError(f"snapshots not found for labels {missing}: capture with `factory snap after <label>`")
-    wanted = e.art("plan").get("acceptance_criteria", [])
-    checked = {c.criterion.strip().lower() for c in a.criteria}
-    unchecked = [c for c in wanted if c.strip().lower() not in checked]
-    if unchecked:
-        raise FactoryError("acceptance criteria not checked: " + "; ".join(unchecked))
-    if failed := [c for c in a.criteria if not c.met]:
-        raise Retry("acceptance failed: " + "; ".join(f"{c.criterion} ({c.evidence})" for c in failed))
+def _post_work(e: Engine, o: Any) -> str | None:
+    w: WorkOut = o
+    if w.questions:
+        raise Ask(w.notes or "the ticket is unclear", w.questions)
+    if w.stop:
+        raise Stop("ineligible", w.stop)
+    if len(w.summary) < 5 or not w.acceptance_criteria:
+        raise FactoryError(f"{e.st.node} needs a `summary` (commit subject) and its `acceptance_criteria`")
+    if not w.flow or not Path(w.flow).is_file():
+        raise FactoryError(f"flow not found: {w.flow or '(empty)'}: write it at the FLOW line and run it")
+    _check_change(e)
+    if failed := [c for c in w.acceptance_criteria if not c.met and not c.blocked]:
+        raise Retry("criteria not met: " + "; ".join(f"{c.criterion} ({c.evidence})" for c in failed))
     return None
 
 
@@ -991,42 +1060,11 @@ def check_workflow(wf: workflow.Workflow) -> None:
         )
 
 
-def _post_review(e: Engine, o: Any) -> str | None:
-    r: ReviewOut = o
-    detector = [rl.Finding.model_validate(f) for f in e.out("_review_ctx").get("detector", [])]
-    unanswered = [
-        d for d in detector if d.severity in ("blocker", "major") and not any(d.same_spot(f) for f in r.findings)
-    ]
-    if unanswered:
-        raise FactoryError(
-            "detector findings without an outcome: " + ", ".join(f"{d.rule}@{d.file}:{d.line}" for d in unanswered)
-        )
-    e.st.review_rounds += 1
-    (e.dir / f"review-round-{e.st.review_rounds}.json").write_text(r.model_dump_json(indent=2))
-    applied = [f for f in r.findings if f.outcome == "applied"]
-    if rl.verdict(r.findings) == "NEEDS WORK":
-        raise Stop("gate-needs-work", "open blocker/major findings:\n" + rl.table(r.findings))
-    if applied:
-        if e.st.review_rounds >= e.cfg.limits.max_review_rounds:
-            raise Stop("gate-needs-work", f"review still changing code after {e.st.review_rounds} rounds")
-        return "checks"  # re-run checks, verify and commit (amend), then review again
-    return None
-
-
 POST: dict[str, Callable[[Engine, Any], str | None]] = {
-    "triage": _post_triage,
-    "reproduce": _post_repro,
-    "fix": _post_fix,
-    "verify": _post_verify,
-    "review": _post_review,
-    "plan": _post_plan,
-    "baseline": _post_baseline,
-    "implement": _post_fix,
-    "accept": _post_accept,
     "research": _post_research,
     "split": _post_split,
     "spec": _post_spec,
     "architecture": _post_architecture,
-    "scaffold": _post_fix,
     "custom": _post_custom,
+    "work": _post_work,
 }

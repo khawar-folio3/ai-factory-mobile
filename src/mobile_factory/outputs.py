@@ -1,120 +1,16 @@
 from __future__ import annotations
 
-from typing import Literal
+import re
+from typing import Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from .guardrail.rules import Finding
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _Out(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class TriageOut(_Out):
-    verdict: Literal["eligible", "needs-info", "ineligible", "duplicate", "already-fixed"]
-    reason: str = Field(min_length=3)
-    summary: str = Field(min_length=3, description="one line: what is wrong, where")
-    category: str = Field("", description="e.g. crash, ui_spacing, copy, navigation, state, network, color_token")
-    root_cause_hypothesis: str = ""
-    plan: list[str] = Field(default_factory=list)
-    areas: list[str] = Field(default_factory=list, description="files/packages expected to change")
-    estimated_files: int = Field(0, ge=0)
-    public_api_change: bool = False
-    risk_classes: list[str] = Field(
-        default_factory=list, description="payment, auth, security, data_loss, migration, ..."
-    )
-    questions: list[str] = Field(default_factory=list, description="for needs-info: what the reporter must answer")
-
-
-class ReproOut(_Out):
-    reproduced: bool
-    confidence: float = Field(ge=0, le=1)
-    steps: list[str] = Field(min_length=1)
-    snapshots: list[str] = Field(default_factory=list, description="labels captured with `factory snap before <label>`")
-    notes: str = ""
-
-
-class FixOut(_Out):
-    summary: str = Field(min_length=5, max_length=72, description="imperative commit subject, without the ticket key")
-    root_cause: str = Field(min_length=5)
-    changes: str = Field(min_length=5, description="what changed and why this is the smallest fix")
-    tests_added: bool = False
-    notes: str = ""
-
-
-class VerifyOut(_Out):
-    defect_fixed: bool
-    adjacent_unchanged: bool
-    snapshots: list[str] = Field(default_factory=list, description="labels captured with `factory snap after <label>`")
-    notes: str = ""
-
-
-class ReviewOut(_Out):
-    findings: list[Finding] = Field(default_factory=list)
-
-
 EXAMPLES: dict[str, dict[str, object]] = {
-    "triage": {
-        "verdict": "eligible",
-        "reason": "clear repro steps, single screen, no backend change",
-        "summary": "Profile avatar is clipped on small screens",
-        "category": "ui_spacing",
-        "root_cause_hypothesis": "fixed 48dp height in ProfileHeader",
-        "plan": ["make the avatar container wrap_content", "add a screenshot label for small devices"],
-        "areas": ["feature/profile/src/main/java/.../ProfileHeader.kt"],
-        "estimated_files": 1,
-        "public_api_change": False,
-        "risk_classes": [],
-    },
-    "reproduce": {
-        "reproduced": True,
-        "confidence": 0.9,
-        "steps": ["open Profile", "observe avatar"],
-        "snapshots": ["profile"],
-    },
-    "fix": {
-        "summary": "Wrap avatar container height on profile header",
-        "root_cause": "hardcoded height clipped the image",
-        "changes": "ProfileHeader.kt: height -> wrapContentHeight(); unit test unchanged (layout only)",
-        "tests_added": False,
-    },
-    "verify": {"defect_fixed": True, "adjacent_unchanged": True, "snapshots": ["profile", "settings"]},
-    "review": {
-        "findings": [
-            {
-                "file": "feature/profile/ProfileHeader.kt",
-                "line": 42,
-                "rule": "S001",
-                "severity": "major",
-                "suggestion": "remove narrating comment",
-                "outcome": "applied",
-            }
-        ]
-    },
-    "plan": {
-        "verdict": "eligible",
-        "reason": "one screen, existing API, fits one PR",
-        "summary": "Show a Favourites filter on the Spaces list",
-        "acceptance_criteria": ["A Favourites chip appears above the list", "Tapping it shows only favourited spaces"],
-        "plan": ["add chip to SpacesFilterBar", "filter in SpacesViewModel", "unit test the filter"],
-        "areas": ["feature/spaces"],
-        "screens": ["spaces_list"],
-        "estimated_files": 3,
-    },
-    "baseline": {"snapshots": ["spaces_list"], "steps": ["open Spaces tab"]},
-    "implement": {
-        "summary": "Add a Favourites filter to the Spaces list",
-        "changes": "chip + VM filter",
-        "tests_added": True,
-    },
-    "accept": {
-        "criteria": [
-            {"criterion": "A Favourites chip appears above the list", "met": True, "evidence": "snap spaces_list"},
-            {"criterion": "Tapping it shows only favourited spaces", "met": True, "evidence": "SpacesViewModelTest"},
-        ],
-        "snapshots": ["spaces_list"],
-    },
     "research": {
         "question": "Can we drop the legacy map SDK?",
         "answer": "Yes after OMX moves to MapUIKit; two screens still use it.",
@@ -137,52 +33,39 @@ EXAMPLES: dict[str, dict[str, object]] = {
         "modules": ["app", "core:data", "feature:checkin"],
         "decisions": [{"topic": "DI", "choice": "Hilt", "why": "team standard"}],
     },
-    "scaffold": {"summary": "Create the visitor app with the check-in slice", "changes": "project + slice"},
     "custom": {"summary": "Checked the analytics events", "files": ["context/analytics.md"], "ok": True},
+    "work": {
+        "summary": "Wrap avatar container height on profile header",
+        "acceptance_criteria": [
+            {"criterion": "The full avatar shows on Profile", "met": True, "evidence": "criterion 1 passed"},
+        ],
+        "flow": "<run>/flows/work.yaml",
+        "notes": "",
+    },
 }
-
-
-class PlanOut(_Out):
-    verdict: Literal["eligible", "needs-info", "ineligible", "too-big", "duplicate"]
-    reason: str = Field(min_length=3)
-    summary: str = Field(min_length=3, description="one line: what the user gets")
-    acceptance_criteria: list[str] = Field(
-        default_factory=list, description="each one observable on the device or in a test; from the ticket or drafted"
-    )
-    plan: list[str] = Field(default_factory=list)
-    areas: list[str] = Field(default_factory=list, description="files/packages expected to change")
-    screens: list[str] = Field(default_factory=list, description="labels of the screens to baseline and check")
-    designs: list[str] = Field(default_factory=list, description="Figma links or frame names the change follows")
-    estimated_files: int = Field(0, ge=0)
-    public_api_change: bool = False
-    risk_classes: list[str] = Field(default_factory=list)
-    questions: list[str] = Field(default_factory=list, description="for needs-info: what the reporter must answer")
-    subtasks: list[str] = Field(default_factory=list, description="for too-big: one line per proposed sub-task")
-
-
-class BaselineOut(_Out):
-    snapshots: list[str] = Field(min_length=1, description="labels captured with `factory snap before <label>`")
-    steps: list[str] = Field(default_factory=list, description="how to reach each screen")
-    notes: str = ""
-
-
-class ImplementOut(_Out):
-    summary: str = Field(min_length=5, max_length=72, description="imperative commit subject, without the ticket key")
-    changes: str = Field(min_length=5, description="what changed and why, briefly")
-    tests_added: bool = False
-    notes: str = ""
 
 
 class Criterion(BaseModel):
     criterion: str
     met: bool
     evidence: str = Field(min_length=3, description="snapshot label, test name or what was observed")
+    blocked: bool = Field(False, description="cannot be checked for an external reason (backend data, access)")
+    reason: str = Field("", description="why it is blocked (required when blocked)")
+
+    @model_validator(mode="after")
+    def _reason_when_blocked(self) -> Criterion:
+        if self.blocked and not self.reason.strip():
+            raise ValueError(f"'{self.criterion}' is blocked: say why in `reason`")
+        return self
 
 
-class AcceptOut(_Out):
-    criteria: list[Criterion] = Field(min_length=1)
-    snapshots: list[str] = Field(default_factory=list, description="labels captured with `factory snap after <label>`")
+class WorkOut(_Out):
+    summary: str = Field("", max_length=72, description="imperative commit subject, without the ticket key")
+    acceptance_criteria: list[Criterion] = Field(default_factory=list, description="each met or blocked, with evidence")
+    flow: str = Field("", description="the Maestro flow that checks every criterion")
     notes: str = ""
+    questions: list[str] = Field(default_factory=list, description="the ticket is unclear: ask these, change nothing")
+    stop: str = Field("", description="too big or not a code change: why the run stops")
 
 
 class Option(BaseModel):
@@ -251,19 +134,26 @@ class CustomOut(_Out):
 
 
 MODELS: dict[str, type[_Out]] = {
-    "triage": TriageOut,
-    "reproduce": ReproOut,
-    "fix": FixOut,
-    "verify": VerifyOut,
-    "review": ReviewOut,
-    "plan": PlanOut,
-    "baseline": BaselineOut,
-    "implement": ImplementOut,
-    "accept": AcceptOut,
     "research": ResearchOut,
     "split": SplitOut,
     "spec": SpecOut,
     "architecture": ArchitectureOut,
-    "scaffold": ImplementOut,
     "custom": CustomOut,
+    "work": WorkOut,
 }
+
+
+def fields(model: type[BaseModel]) -> str:
+    """What an output needs, one line: `name*: type` (* = required), nested models spelled out after it."""
+    nested: dict[str, type[BaseModel]] = {}
+
+    def name(a: object) -> str:
+        for x in (a, *get_args(a)):
+            if isinstance(x, type) and issubclass(x, BaseModel):
+                nested[x.__name__] = x
+        return a.__name__ if isinstance(a, type) else re.sub(r"\b(?:\w+\.)+(\w+)", r"\1", str(a))
+
+    line = ", ".join(
+        f"{n}{'*' if f.is_required() else ''}: {name(f.annotation)}" for n, f in model.model_fields.items()
+    )
+    return line + "".join(f"; {k} = {{{fields(m)}}}" for k, m in nested.items())

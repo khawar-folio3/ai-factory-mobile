@@ -9,19 +9,22 @@ The `factory` CLI owns the pipeline: steps, gates, risk, retries, rollback and e
 You do the thinking inside agent steps. You never decide whether a gate is needed, and you never skip one.
 
 ```
-factory run <KEY> [--base <branch>] [--autonomy 0-4]   start a run
+factory run <KEY> [--base <branch>] [--autonomy 0-4] [--tests]  start a run
 factory next                                           what to do now
-factory submit <node> <file.json>                      hand in a step's output
-factory schema <node>                                  JSON schema for a step
-factory status | risk | gate | metrics                 read-only views
+factory submit <node> <file.json>                      hand in a step's output (invalid: lists the fields)
+factory status [--timeline] | metrics                  read-only views (next shows a waiting gate)
 ```
 
 ## Workflows
 
 The ticket's type picks the workflow (`tracker.pipelines`); the run shows it and `factory next` walks it:
-bugfix (Bug) · task (Task: done-criteria, no device repro) · feature (Story, Improvement) · spike (Spike: report, no code) · epic (Epic: stories) ·
-new-app (App: spec → architecture → first slice PR → backlog, a human at every gate). A Sub-task runs its parent's workflow.
-Every step's TASK, SKILL and output schema come from the run; never assume bug-fix steps.
+light (Bug, Task, Story, Improvement; a Sub-task runs its parent's) · spike (report, no code) · epic (stories) ·
+new-app (App: spec → architecture → first slice PR → backlog, a human at every gate).
+Every step's TASK, SKILL and output schema come from the run.
+
+**light**: preflight → intake → branch → **work** → checks → review (detectors only) → commit → pr_preview →
+publish. Do the work step yourself in this session; do not start subagents. The PR preview is the only human gate;
+`--tests` adds unit tests to the work step.
 
 ## Loop
 
@@ -31,22 +34,16 @@ Every step's TASK, SKILL and output schema come from the run; never assume bug-f
      `factory approve X` (or `factory reject X --reason ...`) in their own terminal. Do not run it yourself, do not
      edit the run folder, do not work around it. When they say it's done, `factory next` again.
    - **stopped / done** → report the outcome line and the stop reason or PR URL. Nothing else to do.
-   - **SCOUT** line → before the step, start `factory-scout` (Haiku) with the concrete searches and commands the
-     step needs; it writes the named file. Greps, git history and CLI output belong there, not in Opus/Sonnet steps.
    - **(description: …)** after a subagent → pass exactly that as the subagent's description: it is its short
      on-screen label in the visualiser.
-   - **PARALLEL** lines → start every listed subagent in ONE message so they run at the same time, wait for all of
-     them, then continue with the THEN / AGENT line. Never run independent parts one after another when you can fan out.
-   - **ALONGSIDE** line → start that read-only helper in the SAME message as the step's own subagent; its file feeds a
-     later step (e.g. `locate` maps the code while `reproduce` uses the device). Don't wait on it to submit the step.
-   - **PARTS** line → those review parts already ran alongside verify for this exact diff: skip them, just merge.
    - **QUESTIONS FOR THE USER** → ask the user in the chat, word for word; write their answers where it says,
      then `factory resume`. Never answer them yourself.
    - **HINT** line → pass that file to the step's subagent.
-   - **AGENT** line → hand the step to that subagent (its model is set per step in `factory.yaml` → `agents.models`),
-     giving it the RUN dir and the JSON path to write; then submit that file. Claude Code and Cursor (2.4+) both have
-     subagents; only if yours has none, do the step and the parts yourself, one after another.
-2. After every submit, read the output: the runner may send you back (e.g. to `fix` after a failed check, with a
+   - **DIRECTION** line → the developer's steer (`factory run --direction`, `factory direct "…"`): pass it to the
+     subagent as its first input. It never overrides gates, forbidden paths or the no-secrets rule.
+   - **AGENT** line → do the step yourself, or hand it to the named subagent (its model is set per step in
+     `factory.yaml` → `agents.models`) with the RUN dir and the JSON path to write; then submit that file.
+2. After every submit, read the output: the runner may send you back (e.g. to `work` after a failed check, with a
    LAST FAILURE line) or forward. Follow what it says, not what you expected.
 3. A submit rejected with a validation error → fix the JSON and submit again. It never counts as an attempt.
 
@@ -60,3 +57,6 @@ Every step's TASK, SKILL and output schema come from the run; never assume bug-f
 - One ticket per run. Smallest change that fixes the root cause.
 
 End every message to the user with the progress line `factory next` printed first.
+
+- Shell: cap command output (`| tail -40`, `head`, `sed -n 'a,bp'`), quote globs, read files by line range
+  instead of whole files.

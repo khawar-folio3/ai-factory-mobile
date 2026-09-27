@@ -25,7 +25,7 @@ def test_auth_area_drops_to_supervised_or_lower() -> None:
 def test_broad_change_is_manual() -> None:
     s = RiskSignals(actual_files=12, modules_touched=4, lines_changed=400, public_api_change=True, reproduced=False)
     r = assess(s, CFG)
-    assert r.score == 100 and r.level == 0
+    assert r.score == 85 and r.level == 0
 
 
 def test_actual_diff_overrides_estimate() -> None:
@@ -38,3 +38,9 @@ def test_gate_threshold() -> None:
     assert gate_is_automatic(GateConfig(auto_at=3), 3)
     assert not gate_is_automatic(GateConfig(auto_at=3), 2)
     assert not gate_is_automatic(GateConfig(auto_at=5), 4)
+
+
+def test_no_new_test_costs_nothing() -> None:
+    with_tests = assess(RiskSignals(actual_files=3, tests_added=True), CFG)
+    without = assess(RiskSignals(actual_files=3, tests_added=False), CFG)
+    assert with_tests.score == without.score

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..globs import matches
 from .diff import FileDiff
@@ -37,6 +37,8 @@ class SlopRule(BaseModel):
 
 
 class Finding(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # a typo'd or invented field is an error, not silently dropped
+
     file: str
     line: int | None = None
     rule: str
@@ -55,9 +57,6 @@ class Finding(BaseModel):
     @property
     def blocking(self) -> bool:
         return self.severity in ("blocker", "major") and self.outcome in ("open", "not applied")
-
-    def same_spot(self, other: Finding) -> bool:
-        return (self.rule, self.file, self.line) == (other.rule, other.file, other.line)
 
 
 def parse_rules(text: str, source: str) -> tuple[list[Rule], str]:

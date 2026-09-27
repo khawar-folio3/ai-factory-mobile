@@ -16,20 +16,21 @@ into eight files loses its autonomy mid-run.
 | public API / contract change | 20 |
 | high-risk area (`autonomy.high_risk_classes`: auth, payment, security, data_loss, migration, mdm, crypto) | 40 |
 | not reproduced / confidence < 0.5 | 25 / 15 |
-| multi-file logic change without a test | 5 |
 | more than one platform | 15 |
 | low-risk category (`autonomy.low_risk_categories`: typo, copy, ui_spacing, color_token…) | −10 |
 
 `autonomy.thresholds` maps a level to the highest score it allows (default `{4: 15, 3: 35, 2: 55, 1: 75}`).
 
 ```
-$ factory risk
+$ factory status
 risk 46/100 -> allows L2, ceiling L4 => autonomy L2 (supervised: plan and repro are automatic; diff, review and PR ask)
     +6  2 file(s) expected
    +40  high-risk area: auth
 ```
 
 ## Gates
+
+bugfix, task and feature only have the `pr` gate. The others are used by new-app and your own workflows.
 
 | Gate | After | Default `auto_at` | The human sees |
 |---|---|---|---|
@@ -40,7 +41,7 @@ risk 46/100 -> allows L2, ceiling L4 => autonomy L2 (supervised: plan and repro 
 | pr | PR preview | 4 | exact title and body, hash, tracker transition |
 
 A gate is automatic when `level >= auto_at`. Set `auto_at: 5` to make a gate always human.
-Overrides that always win: a *dismissed* blocker/major finding forces the review gate; nothing is ever merged or
+Overrides that always win: a *dismissed* or open blocker/major finding forces the review and PR gates; nothing is ever merged or
 marked ready for review.
 
 ## Suggested rollout

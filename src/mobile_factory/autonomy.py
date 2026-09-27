@@ -6,8 +6,8 @@ from .config import AutonomyConfig, GateConfig
 
 LEVELS = {
     0: "manual: every gate asks a human",
-    1: "assisted: plan is automatic; repro, diff, review and PR ask",
-    2: "supervised: plan and repro are automatic; diff, review and PR ask",
+    1: "assisted: the spec is automatic; the rest ask (a code ticket: only the PR asks)",
+    2: "supervised: the spec is automatic; the PR asks",
     3: "trusted: only the PR preview asks",
     4: "autonomous: runs to a draft PR without asking",
 }
@@ -21,8 +21,6 @@ class RiskSignals(BaseModel):
     lines_changed: int = 0
     public_api_change: bool = False
     risk_classes: list[str] = Field(default_factory=list)
-    reproduced: bool | None = None
-    repro_confidence: float | None = None
     tests_added: bool | None = None
     platforms: int = 1
 
@@ -61,12 +59,6 @@ def score(s: RiskSignals, cfg: AutonomyConfig) -> list[tuple[str, int]]:
     high = sorted(set(s.risk_classes) & set(cfg.high_risk_classes))
     if high:
         f.append((f"high-risk area: {', '.join(high)}", 40))
-    if s.reproduced is False:
-        f.append(("not reproduced", 25))
-    elif s.repro_confidence is not None and s.repro_confidence < 0.5:
-        f.append((f"low repro confidence {s.repro_confidence:.1f}", 15))
-    if s.tests_added is False and files > 1:
-        f.append(("logic change without a test", 5))
     if s.platforms > 1:
         f.append((f"{s.platforms} platforms", 15))
     if s.category in cfg.low_risk_categories:

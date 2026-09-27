@@ -58,3 +58,6 @@ Matching comment → bump evidence, prepend PR numbers (keep 5). New cluster mee
 New `CHANGES_REQUESTED` hit → raise to `blocker`. Newest evidence older than 6 months → append `[stale]` to the title.
 
 Finish by showing the rule count per severity and one line per rule, and **stop for the developer's review**.
+
+- Shell: cap command output (`| tail -40`, `head`, `sed -n 'a,bp'`), quote globs, read files by line range
+  instead of whole files.

@@ -18,6 +18,9 @@ def test_minimal_config_gets_defaults(tmp_path: Path) -> None:
     assert lc.cfg.autonomy.ceiling == 2
     assert lc.cfg.gates["pr"].auto_at == 4
     assert "**/build.gradle*" in lc.cfg.project.forbidden_paths
+    assert lc.cfg.steps == {}
+    models = lc.cfg.agents.models
+    assert models["spec"] == "opus" and "fix" not in models
 
 
 def test_partial_gate_override_keeps_other_defaults(tmp_path: Path) -> None:

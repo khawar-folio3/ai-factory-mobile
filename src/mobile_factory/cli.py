@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import getpass
 import json
 import os
@@ -11,13 +12,14 @@ import sys
 import textwrap
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 
-from . import __version__, adapters, config, doctor, events, metrics, usage, viz, workflow
+from . import __version__, adapters, config, doctor, events, gateview, metrics, selftest, timeline, usage, viz, workflow
 from . import setup as machine
 from . import uninstall as remover
 from .config import VizConfig
@@ -29,13 +31,14 @@ from .guardrail import harvest as harvester
 from .guardrail import rules as rl
 from .init import init as do_init
 from .integrations import github
-from .outputs import MODELS
-from .pipeline import Engine
+from .pipeline import REOPENABLE, TESTS, Engine
+from .platforms import android as droid
+from .platforms import maestro
 from .platforms import make as make_platform
-from .platforms.base import snapshot_diff
+from .platforms.base import Platform
 from .proc import has, which
 from .proc import run as proc_run
-from .state import RunStore
+from .state import RunState, RunStore
 from .wizard import Wizard, store_secret, write_local
 
 app = typer.Typer(
@@ -66,8 +69,14 @@ def _lc() -> config.LoadedConfig:
     return lc
 
 
+def _live(eng: Engine) -> Engine:
+    """Automatic steps (gradle lint, tests, build) say when they start and finish instead of blocking silently."""
+    eng.notify = lambda msg: typer.echo(typer.style(f"  {msg}", dim=True), err=True)
+    return eng
+
+
 def _engine(run: str | None = None) -> Engine:
-    return Engine.load(_lc(), run)
+    return _live(Engine.load(_lc(), run))
 
 
 _MARKS = {
@@ -873,9 +882,14 @@ def install(target: Annotated[str, typer.Option(help="claude | cursor | all")] =
 
 
 @app.command(name="doctor")
-def doctor_cmd(offline: bool = typer.Option(False, help="Skip network checks.")) -> None:
-    """Check tools, secrets, auth, device and config."""
+def doctor_cmd(
+    offline: bool = typer.Option(False, help="Skip network checks."),
+    device: bool = typer.Option(False, "--device", help="Time every device primitive on the attached emulator."),
+) -> None:
+    """Check tools, secrets, auth, device and config; `--device` exercises the real device (writes only in the home)."""
     lc = _lc()
+    if device:
+        _selftest(lc)
     text, ok = doctor.render(doctor.checks(lc, online=not offline))
     _say(text)
     if not offline and sys.stdin.isatty() and sys.stdout.isatty():
@@ -933,7 +947,7 @@ def exec_cmd(ctx: typer.Context) -> None:
 
 
 @app.command()
-def run(
+def run(  # noqa: PLR0917 - typer options
     ticket: str,
     base: Annotated[
         str | None, typer.Option(help="Base branch for this run (required when base_branch is 'ask').")
@@ -941,20 +955,42 @@ def run(
     autonomy: Annotated[int | None, typer.Option(min=0, max=4, help="Autonomy ceiling for this run (0-4).")] = None,
     workflow_name: Annotated[
         str | None,
-        typer.Option("--workflow", help="Force a workflow instead of detecting it (bugfix, task, feature, …)."),
+        typer.Option("--workflow", help="Force a workflow instead of detecting it (light, spike, epic, new-app)."),
     ] = None,
+    tests: Annotated[bool, typer.Option("--tests", help="The work step also adds unit tests (default off).")] = False,
+    direction: Annotated[str, typer.Option(help="What the factory should know or do first (every step sees it).")] = "",
+    direction_file: Annotated[Path | None, typer.Option(help="The direction, from a file.")] = None,
 ) -> None:
     """Start a run for a ticket and advance to the first agent step or gate."""
     if workflow_name and workflow_name not in workflow.all_workflows():
         raise FactoryError(f"unknown workflow {workflow_name}; known: {', '.join(workflow.all_workflows())}")
+    direction = direction_file.read_text() if direction_file else direction
     lc = _lc()
     open_run = next((r for r in RunStore(lc.runs_dir).all() if r.ticket == ticket and not r.finished), None)
     if open_run:
-        eng = Engine(lc, open_run)
+        eng = _live(Engine(lc, open_run))
+        if tests and TESTS not in eng.st.enabled:
+            eng.st.enabled.append(TESTS)
+        if direction.strip():
+            eng.direct(direction)
         if sys.stdout.isatty():
             _say(f"  picking up {open_run.id} where it stopped", hints=True)
     else:
-        eng = Engine.start(lc, ticket, ceiling=autonomy, base=base, workflow_name=workflow_name)
+        if not direction.strip() and sys.stdout.isatty() and not os.environ.get("CI"):
+            direction = typer.prompt(
+                _q("Anything the factory should know or do first? (Enter to skip)"), default="", show_default=False
+            )
+        eng = _live(
+            Engine.start(
+                lc,
+                ticket,
+                ceiling=autonomy,
+                base=base,
+                workflow_name=workflow_name,
+                enable=[TESTS] if tests else [],
+                direction=direction,
+            )
+        )
     eng.advance()
     if sys.stdout.isatty() and not os.environ.get("CI"):
         _wizard(eng)
@@ -998,10 +1034,6 @@ def _answer_here(eng: Engine) -> None:
     for ln in _wrap(ask.get("reason", ""), lines=4):
         typer.echo(typer.style(ln, dim=True))
     typer.echo()
-    if ask.get("choices"):
-        pick = _choose(ask["questions"][0], ask["choices"], 0)
-        eng.answer([ask["choices"][pick]])
-        return
     answers = []
     total = len(ask["questions"])
     for i, q in enumerate(ask["questions"], 1):
@@ -1025,8 +1057,7 @@ def _answer_here(eng: Engine) -> None:
 
 def _gate_here(eng: Engine, gate: str) -> None:
     rec = eng.st.gates[gate]
-    for line in eng.gate_summary(gate).splitlines()[:25]:
-        typer.echo(f"    {line}")
+    typer.echo(gateview.render(eng, gate))
     typer.echo()
     pick = _choose(f"Gate '{gate}': what now?", ["Approve", "Reject (stops the run)", "Pause here"], 0)
     if pick == 2:
@@ -1047,8 +1078,8 @@ def _agent_step(eng: Engine, agent: str, tries: int = 2) -> None:
     for attempt in range(1, tries + 1):
         out.unlink(missing_ok=True)
         brief = eng.instructions().replace(
-            f"SUBMIT write JSON then: factory submit {node.name} <file.json>",
-            f"SUBMIT write the output JSON to {out} (do NOT run factory submit; the runner submits it)",
+            f"SUBMIT write JSON like EXAMPLE, then: factory submit {node.name} <file.json>",
+            f"SUBMIT write the output JSON to {out} (shaped like EXAMPLE; do NOT run factory submit, the runner does)",
         )
         prompt = (
             f"You are running one step of a factory run in {eng.lc.root}. Read the SKILL file, do the step, then "
@@ -1146,7 +1177,9 @@ def _show(eng: Engine, brief: bool = False) -> None:
     typer.echo()
     typer.echo(f"  {typer.style(st.ticket, bold=True)}  {typer.style(summary[:70], dim=True)}")
     bar = "".join(
-        typer.style("━━", fg="green")
+        typer.style("┄┄", dim=True)
+        if eng.skipped(names[k].name)
+        else typer.style("━━", fg="green")
         if k < i
         else typer.style("━━", fg="cyan", bold=True)
         if k == i
@@ -1155,6 +1188,8 @@ def _show(eng: Engine, brief: bool = False) -> None:
     )
     typer.echo(f"  {bar}  {typer.style(f'{i + 1}/{len(names)}', dim=True)}")
     typer.echo(f"  {typer.style(st.pipeline, fg='cyan')} workflow · {node.title}")
+    if said := eng.direction():
+        typer.echo(f"  {typer.style('direction:', fg='yellow')} {typer.style(said[:90], dim=True)}")
     typer.echo()
     if brief and not st.finished:  # inside the wizard: the step itself says what happens
         return
@@ -1169,7 +1204,7 @@ def _show(eng: Engine, brief: bool = False) -> None:
         first = eng.gate_summary(gate).splitlines()[0] if eng.gate_summary(gate) else ""
         typer.echo(f"  {typer.style('◆ waiting for you', fg='yellow', bold=True)}  {first[:90]}")
         typer.echo(
-            f"  {typer.style('review:', dim=True)} factory gate {gate}    "
+            f"  {typer.style('review:', dim=True)} factory next    "
             f"{typer.style('then:', dim=True)} factory approve {gate}  |  factory reject {gate} --reason …"
         )
     elif node.kind == "agent":
@@ -1182,16 +1217,43 @@ def _show(eng: Engine, brief: bool = False) -> None:
     typer.echo()
 
 
+def _selftest(lc: config.LoadedConfig) -> None:
+    def ask(msg: str) -> bool:
+        if not sys.stdin.isatty():
+            return False
+        _say(msg)
+        input()
+        return True
+
+    out = lc.state_dir / "selftest" / time.strftime("%Y%m%d-%H%M%S")
+    steps = selftest.SelfTest(lc, make_platform(lc), out, _say, ask).run()
+    raise typer.Exit(0 if all(s.ok for s in steps) else 1)
+
+
 @app.command(name="next")
 def next_cmd(run: RunOpt = None) -> None:
-    """Show what the agent must do now (or what the run waits on)."""
-    _show(_engine(run))
+    """Show what the agent must do now, or what the waiting gate asks a human to approve."""
+    eng = _engine(run)
+    _show(eng)
+    if eng.st.status == "waiting_gate" and (g := eng.node().gate):
+        typer.echo(gateview.render(eng, g))
+
+
+@app.command()
+def direct(text: str, run: RunOpt = None) -> None:
+    """Add direction mid-run (timestamped); every later agent step sees it. It never overrides gates or hard rules."""
+    eng = _engine(run)
+    eng.direct(text)
+    _say(f"ok: direction added to {eng.direction_file}")
 
 
 @app.command()
 def resume(run: RunOpt = None) -> None:
-    """Continue automatic steps of a run (after a restart, a fixed environment or an approval)."""
+    """Continue automatic steps of a run (after a restart, a fixed environment or an approval); a run stopped by the
+    review or a failed step starts again at the step it stopped on."""
     eng = _engine(run)
+    if eng.st.status == "stopped" and eng.st.outcome in REOPENABLE:
+        eng.reopen()
     eng.advance()
     if sys.stdout.isatty() and not os.environ.get("CI"):
         _wizard(eng)
@@ -1201,7 +1263,7 @@ def resume(run: RunOpt = None) -> None:
 
 @app.command()
 def submit(node: str, file: Path, run: RunOpt = None) -> None:
-    """Submit an agent step's JSON output."""
+    """Submit an agent step's JSON output (an invalid one lists the fields it needs)."""
     data = json.loads(file.read_text())
     eng = _engine(run)
     eng.submit(node, data)
@@ -1209,27 +1271,38 @@ def submit(node: str, file: Path, run: RunOpt = None) -> None:
 
 
 @app.command()
-def schema(node: str) -> None:
-    """Print the JSON schema an agent step must submit."""
-    step = workflow.find_step(node)
-    kind = step.type if step else node
-    if kind not in MODELS:
-        raise FactoryError(f"no schema for {node}; agent steps: {', '.join(MODELS)}")
-    _say(json.dumps(MODELS[kind].model_json_schema(), indent=2))
-
-
-@app.command()
-def status(run: RunOpt = None, all_runs: bool = typer.Option(False, "--all", help="List every run.")) -> None:
-    """Progress of the active run, or every run."""
+def status(
+    run: RunOpt = None,
+    all_runs: bool = typer.Option(False, "--all", help="List every run."),
+    timeline_: bool = typer.Option(False, "--timeline", help="Where the time went: per step, device commands."),
+    step: str = typer.Option("", "--step", help="With --timeline: every device command of one step."),
+    summary: bool = typer.Option(False, "--summary", help="With --timeline: time by agent, device, gradle, human."),
+) -> None:
+    """Progress, risk and tokens of the active run; every run with --all; the time line with --timeline."""
     lc = _lc()
     if all_runs:
         for st in RunStore(lc.runs_dir).all():
             _say(f"{st.id:<34} {st.status:<14} {st.node:<11} {st.outcome or '-':<18} {st.pr_url}")
         return
     eng = Engine.load(lc, run)
+    if timeline_ or step or summary:
+        kinds = {
+            n.name: "agent" if n.kind == "agent" else "gradle" if n.type == "checks" else "auto" for n in eng.nodes
+        }
+        sts = timeline.steps(
+            events.read(eng.lc.state_dir / "events.jsonl", eng.st.id), timeline.read_device(eng.dir), kinds
+        )
+        if step:
+            s = next((x for x in sts if x.step == step), None)
+            _say(timeline.render_step(s) if s else f"no time logged for step '{step}'")
+        else:
+            _say(timeline.render_summary(sts) if summary else timeline.render_steps(sts))
+        return
     _say(eng.progress())
     if eng.st.stop_reason:
         _say(f"stop: {eng.st.stop_reason}")
+    if eng.st.risk:
+        _say(eng.st.risk.explain())
     _say(usage.render(_record_usage(eng)), hints=True)
 
 
@@ -1253,23 +1326,6 @@ def tokens(run: RunOpt = None, all_runs: bool = typer.Option(False, "--all", hel
 
 
 @app.command()
-def risk(run: RunOpt = None) -> None:
-    """Explain the run's risk score and autonomy level."""
-    eng = _engine(run)
-    _say(eng.st.risk.explain() if eng.st.risk else "not assessed yet (after triage)")
-
-
-@app.command()
-def gate(run: RunOpt = None) -> None:
-    """Show what the waiting gate asks a human to approve."""
-    eng = _engine(run)
-    g = eng.node().gate
-    if eng.st.status != "waiting_gate" or not g:
-        raise FactoryError(f"no gate waiting (run at {eng.st.node}, {eng.st.status})")
-    _say(eng.gate_summary(g))
-
-
-@app.command()
 def approve(gate_name: Annotated[str, typer.Argument(metavar="GATE")], run: RunOpt = None) -> None:
     """Approve a waiting gate (human only, interactive)."""
     _human_only("approving a gate")
@@ -1277,9 +1333,10 @@ def approve(gate_name: Annotated[str, typer.Argument(metavar="GATE")], run: RunO
     rec = eng.st.gates.get(gate_name)
     if not rec or rec.decision != "pending":
         raise FactoryError(f"gate {gate_name} is not waiting")
-    _say(eng.gate_summary(gate_name))
-    typed = typer.prompt(f"\nType {rec.code} to approve gate '{gate_name}'")
+    typer.echo(gateview.render(eng, gate_name))
+    typed = typer.prompt(gateview.confirm_prompt(gate_name, rec.code), prompt_suffix=" ")
     eng.decide(gate_name, True, by=getpass.getuser(), code=typed.strip())
+    typer.echo(gateview.approved(gate_name))
     _show(eng)
 
 
@@ -1345,74 +1402,159 @@ def _snap_root(run: str | None) -> Path:
     return eng.dir / "snapshots"
 
 
-@app.command()
-def snap(phase: str, label: Annotated[str, typer.Argument()] = "", run: RunOpt = None) -> None:
-    """`snap before <label>` / `snap after <label>` capture screen + state; `snap diff` compares them."""
+@android_app.command("snap")
+def a_snap(phase: Annotated[str, typer.Argument(help="before | after")], label: str, run: RunOpt = None) -> None:
+    """Evidence: screenshot + text state (activity, fragments, labels, ocr) to <run>/snapshots/<phase>/<label>."""
     root = _snap_root(run)
-    if phase == "diff":
-        for lb, change in snapshot_diff(root):
-            _say(f"== {lb}\n    {change}" if change == "unchanged" or "\n" not in change else f"== {lb}\n{change}")
-        return
-    if not label:
-        raise FactoryError("usage: factory snap before|after <label>")
-    png, state = make_platform(_lc()).snapshot(root, phase, label)
+    with _device("snap", run, phase=phase, label=label) as d:
+        png, state = d.platform.snapshot(root, phase, label)
+        d.done(str(png), maestro.snap(phase, label))
     _say(f"{png}\n{state}")
+
+
+@dataclass
+class _Device:
+    """One device command: timed into <run>/logs/device.jsonl and recorded into <run>/flows/<step>.yaml."""
+
+    lc: config.LoadedConfig
+    st: RunState | None
+    result: str = ""
+    steps: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def dir(self) -> Path | None:
+        return RunStore(self.lc.runs_dir).path(self.st.id) if self.st else None
+
+    @functools.cached_property
+    def platform(self) -> Platform:
+        return make_platform(self.lc)
+
+    def done(self, result: str, flow: list[str] | None = None) -> str:
+        self.result = result
+        if flow and self.dir and self.st:
+            maestro.record(self.dir / "flows" / f"{self.st.node}.yaml", self.lc.cfg.android.application_id, flow)
+        return result
+
+
+@contextlib.contextmanager
+def _device(command: str, run: str | None = None, **args: Any) -> Iterator[_Device]:
+    lc = _lc()
+    try:
+        st: RunState | None = RunStore(lc.runs_dir).load(run)
+    except FactoryError:
+        st = None  # no run: the command still works, nothing is logged
+    d, ok, t0 = _Device(lc, st if st and not st.finished else None), False, time.monotonic()
+    try:
+        yield d
+        ok = True
+    except typer.Exit as e:
+        ok = e.exit_code == 0
+        raise
+    except Exception as e:
+        d.result = str(e)
+        raise
+    finally:
+        if d.dir and d.st:
+            ms = int((time.monotonic() - t0) * 1000)
+            extra = {"steps": d.steps} if d.steps else {}
+            timeline.log_device(d.dir, d.st.node, command, args, ms, ok=ok, result=d.result, **extra)
 
 
 @android_app.command("install")
 def a_install(run: RunOpt = None) -> None:
     """Build, install and launch the configured variant."""
     eng = _engine(run)
-    res = eng.platform.build_install(eng.dir / "logs")
+    with _device("install", run) as d:
+        res = eng.platform.build_install(eng.dir / "logs")
+        d.done(res.summary.splitlines()[0], ["- launchApp"] if res.ok else None)
     _say(res.summary)
     raise typer.Exit(0 if res.ok else 1)
 
 
-@android_app.command("where")
-def a_where() -> None:
-    """Activity, fragment stack and visible labels."""
-    _say(make_platform(_lc()).screen_state())
+@android_app.command("mock")
+def a_mock(
+    pattern: Annotated[str, typer.Argument(help="Regex on the URL path, e.g. /v3/spaces/types.")] = "",
+    target: Annotated[str, typer.Argument(help="A JSON file to serve, or a jq filter over the real body.")] = "",
+    off: bool = typer.Option(False, "--off", help="Stop mocking: clear the device proxy, stop the local proxy."),
+    run: RunOpt = None,
+) -> None:
+    """Override API responses for this run through a local proxy (mitmproxy), without touching app code."""
+    eng = _engine(run)
+    if off:
+        with _device("mock", run, off=True) as d:
+            _say(d.done(eng.platform.mock_off(eng.dir)))
+    elif pattern and target:
+        with _device("mock", run, pattern=pattern, target=target) as d:
+            droid.mock_add(eng.dir, pattern, target)
+            _say(d.done(eng.platform.mock_on(eng.dir), [f"# mock: {pattern} -> {' '.join(target.split())}"]))
+    else:
+        f = eng.dir / droid.MOCKS
+        _say(f.read_text() if f.is_file() else "no mocks in this run")
 
 
 @android_app.command("tap")
 def a_tap(label: str, nth: int = 1) -> None:
     """Tap the element whose text / content-desc matches."""
-    _say(make_platform(_lc()).tap(label, nth))
-
-
-@android_app.command("wait")
-def a_wait(text: str, timeout: int = 30) -> None:
-    """Poll until text is on screen."""
-    ok = make_platform(_lc()).wait_for(text, timeout)
-    _say(f"found: {text}" if ok else f"timeout waiting for: {text}")
-    raise typer.Exit(0 if ok else 1)
+    with _device("tap", label=label, nth=nth) as d:
+        res = d.platform.tap(label, nth)
+        _say(d.done(res, maestro.tap(getattr(d.platform, "last_hit", {}), label, nth)))
 
 
 @android_app.command("open")
 def a_open(link: str) -> None:
     """Open a deeplink (full URI, or a path under android.deeplink_scheme)."""
-    _say(make_platform(_lc()).open_link(link))
+    with _device("open", link=link) as d:
+        _say(d.done(d.platform.open_link(link), maestro.open_link(droid.full_link(d.lc.cfg.android, link))))
 
 
 @android_app.command("back")
 def a_back() -> None:
     """Hardware back."""
-    make_platform(_lc()).back()
+    with _device("back") as d:
+        d.platform.back()
+        d.done("back", ["- back"])
 
 
-@android_app.command("launch")
-def a_launch() -> None:
-    """Launch the app."""
-    _say(make_platform(_lc()).launch())
+def _flow_file(lc: config.LoadedConfig, name: str, run: str | None = None) -> Path:
+    """A path, a run flow (`work`), or a saved project flow (`spaces-list`)."""
+    lib = lc.path(lc.cfg.android.flows_dir) / maestro.LIBRARY
+    cands = [Path(name).expanduser(), lib / f"{name}.yaml"]
+    with contextlib.suppress(FactoryError):
+        cands.insert(1, RunStore(lc.runs_dir).path(RunStore(lc.runs_dir).load(run).id) / "flows" / f"{name}.yaml")
+    if f := next((c for c in cands if c.is_file()), None):
+        return f
+    raise FactoryError(f"no flow '{name}': a .yaml path, a run flow (work) or a saved one in {lib}")
 
 
-@android_app.command("flow")
-def a_flow(flow: Path, run: RunOpt = None) -> None:
-    """Run a Maestro flow."""
-    eng = _engine(run)
-    res = eng.platform.run_flow(flow, eng.dir / "logs")
-    _say(res.summary)
-    raise typer.Exit(0 if res.ok else 1)
+@android_app.command("replay")
+def a_replay(
+    flow: Annotated[str, typer.Argument(help="A flow .yaml, a run step (work) or a saved flow name.")],
+    mock: Annotated[list[str] | None, typer.Option(help="PATTERN=TARGET, as for `factory android mock`.")] = None,
+    snap_phase: str = typer.Option("", "--snap", help="before|after: where the flow's screenshots go."),
+    run: RunOpt = None,
+) -> None:
+    """Replay a Maestro flow, pass / fail per step, with the given mocks."""
+    with _device("replay", run, flow=flow, snap=snap_phase) as d:
+        f = _flow_file(d.lc, flow, run)
+        home = d.dir or d.lc.state_dir
+        (work := home / "logs").mkdir(parents=True, exist_ok=True)
+        rules = [tuple(m.split("=", 1)) for m in mock or []]
+        for pat, target in rules:
+            droid.mock_add(home, pat, target)
+        if rules:
+            d.platform.mock_on(home)
+        snaps = d.dir / "snapshots" if d.dir else None
+        try:
+            res = maestro.replay(d.platform, f, work, snaps if snap_phase else None, snap_phase)
+        finally:
+            if rules:
+                d.platform.mock_off(home)
+        d.steps = res.steps
+        d.done(res.summary.splitlines()[0])
+        for x in res.steps:
+            _say(f"  {'ok' if x['ok'] else 'FAIL'} {timeline.dur(int(x['duration_ms'])):>7}  {x['step']}")
+        _say(res.summary)
+        raise typer.Exit(0 if res.ok else 1)
 
 
 # ---------- guardrail ----------

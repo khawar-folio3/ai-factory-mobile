@@ -35,9 +35,6 @@ class Step:
     task: str = ""
     model: str = ""
     retry_to: str | None = None
-    alongside: tuple[str, ...] = ()
-    parallel: tuple[str, ...] = ()
-    scout: bool = False
     params: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)
 
     @property
@@ -90,14 +87,11 @@ def _step(d: dict[str, Any]) -> Step:
         task=" ".join(str(d.get("task", "")).split()),
         model=d.get("model", ""),
         retry_to=d.get("retry_to"),
-        alongside=tuple(d.get("alongside", ())),
-        parallel=tuple(d.get("parallel", ())),
-        scout=bool(d.get("scout", False)),
         params={k: v for k, v in d.items() if k not in known},
     )
 
 
-STEP_KEYS = ("name", "title", "kind", "type", "gate", "task", "model", "retry_to", "alongside", "parallel", "scout")
+STEP_KEYS = ("name", "title", "kind", "type", "gate", "task", "model", "retry_to")
 WORKFLOW_KEYS = ("description", "branch", "pr_template", "outcome", "max_level", "artifacts")
 
 
@@ -204,8 +198,3 @@ def get(name: str, root: Path | None = None) -> Workflow:
     if not wf:
         raise ConfigError(f"no workflow {name}; known: {', '.join(all_workflows(root))}")
     return wf
-
-
-def find_step(name: str, root: Path | None = None) -> Step | None:
-    """A step by name in any workflow (for `factory schema <step>`)."""
-    return next((s for wf in all_workflows(root).values() for s in wf.steps if s.name == name), None)

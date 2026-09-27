@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from mobile_factory import config
 from mobile_factory.cli import app
+from mobile_factory.outputs import EXAMPLES
 from mobile_factory.platforms.base import CheckRun
 
 runner = CliRunner()
@@ -67,11 +68,14 @@ def test_doctor_offline(in_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert "taste rules" in r.output
 
 
-def test_schema_and_unknown_node(in_repo: Path) -> None:
-    r = runner.invoke(app, ["schema", "fix"])
-    assert r.exit_code == 0 and json.loads(r.output)["title"] == "FixOut"
-    r = runner.invoke(app, ["schema", "publish"])
-    assert r.exit_code != 0
+def test_invalid_submit_lists_the_fields(in_repo: Path, fake: FakePlatform) -> None:
+    assert runner.invoke(app, ["run", "APP-1"]).exit_code == 0
+    bad = in_repo.parent / "bad.json"
+    bad.write_text("{}")
+    r = runner.invoke(app, ["submit", "work", str(bad)])
+    assert r.exit_code != 0 and "summary" in str(r.exception)
+    for gone in ("schema", "gate", "risk", "selftest", "log", "flows"):
+        assert runner.invoke(app, [gone]).exit_code == 2
 
 
 def test_run_submit_and_gate_via_cli(in_repo: Path, fake: FakePlatform) -> None:
@@ -79,21 +83,10 @@ def test_run_submit_and_gate_via_cli(in_repo: Path, fake: FakePlatform) -> None:
     cfg.write_text(cfg.read_text().replace("ceiling: 4", "ceiling: 0"))  # outside the repo: nothing to commit
     r = runner.invoke(app, ["run", "APP-1"])
     assert r.exit_code == 0, r.output
-    assert "TASK" in r.output and "factory submit triage" in r.output
-
-    triage = in_repo.parent / "triage.json"
-    triage.write_text(
-        json.dumps({"verdict": "eligible", "reason": "clear", "summary": "Avatar clipped", "estimated_files": 1})
-    )
-    r = runner.invoke(app, ["submit", "triage", str(triage)])
-    assert "WAITING ON A HUMAN at gate 'plan'" in r.output
-
-    r = runner.invoke(app, ["gate"])
-    assert "Plan for APP-1" in r.output
-    r = runner.invoke(app, ["approve", "plan"])  # CliRunner is not a TTY
-    assert r.exit_code != 0
-
-    assert "risk" in runner.invoke(app, ["risk"]).output
+    assert "TASK" in r.output and "factory submit work" in r.output
+    assert "✓ Branch & checkpoint" in r.output and "WAITING ON A HUMAN" not in r.output
+    assert "Approve" not in runner.invoke(app, ["next"]).output
+    assert "work (4/10)" in runner.invoke(app, ["status"]).output
     assert "APP-1" in runner.invoke(app, ["status", "--all"]).output
     assert "runs 1" in runner.invoke(app, ["metrics"]).output
     evs = runner.invoke(app, ["events"]).output.splitlines()
@@ -101,6 +94,22 @@ def test_run_submit_and_gate_via_cli(in_repo: Path, fake: FakePlatform) -> None:
 
     r = runner.invoke(app, ["abort", "--reason", "test"])
     assert "✕" in r.output
+
+
+def test_gate_via_cli(in_repo: Path, fake: FakePlatform) -> None:
+    cfg = config.config_path(in_repo)
+    cfg.write_text(cfg.read_text().replace("ceiling: 4", "ceiling: 0"))
+    assert runner.invoke(app, ["run", "APP-1", "--workflow", "new-app"]).exit_code == 0
+    spec = in_repo.parent / "spec.json"
+    spec.write_text(json.dumps(EXAMPLES["spec"]))
+    r = runner.invoke(app, ["submit", "spec", str(spec)])
+    assert "WAITING ON A HUMAN at gate 'plan'" in r.output
+
+    r = runner.invoke(app, ["next"])
+    assert "Approve the spec" in r.output and "APP-1" in r.output
+    assert "Visitor check-in" in r.output and "Autonomy" in r.output and "factory approve plan" in r.output
+    r = runner.invoke(app, ["approve", "plan"])  # CliRunner is not a TTY
+    assert r.exit_code != 0
 
 
 def test_guardrail_check(in_repo: Path) -> None:
@@ -347,3 +356,43 @@ def test_refresh_with_nothing_new_skips_the_agent(repo: Path, monkeypatch: pytes
     cli._optional_extras(repo)
     assert not any(q.startswith("Update") for q in asked)
     assert harvest.undistilled(data) == []  # record bootstrapped: the rules already cover comment 7
+
+
+def test_direction_and_tests_via_cli(in_repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mobile_factory import cli
+
+    note = in_repo.parent / "direction.md"
+    note.write_text("Mock types/v3 first.")
+    r = runner.invoke(app, ["run", "APP-1", "--direction-file", str(note), "--tests"])
+    assert r.exit_code == 0 and "DIRECTION" in r.output
+    eng = cli._engine()
+    assert "Mock types/v3 first." in eng.direction_file.read_text() and eng.st.enabled == ["unit_tests"]
+    assert runner.invoke(app, ["direct", "Only Project Room is wrong."]).exit_code == 0
+    assert "Only Project Room is wrong." in eng.direction_file.read_text()
+    for gone in ("route", "where", "wait", "type", "scroll", "screenshot", "verdict", "inspect"):
+        assert runner.invoke(app, ["android", gone, "x"]).exit_code == 2
+
+
+def test_wizard_direction_prompt_can_be_skipped(
+    in_repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mobile_factory import cli
+
+    asked: list[str] = []
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli.typer, "prompt", lambda q, **k: asked.append(q) or "")
+    monkeypatch.setattr(cli, "_wizard", lambda eng: None)
+    cli.run("APP-1")
+    assert any("Anything the factory should know" in q for q in asked)
+    assert not cli._engine().direction_file.exists()
+
+
+def test_resume_reopens_a_failed_run(in_repo: Path, fake: FakePlatform) -> None:
+    from mobile_factory import cli
+
+    runner.invoke(app, ["run", "APP-1"])
+    eng = cli._engine()
+    eng.finish("stopped", "failed", "tool crashed")
+    eng.save()
+    r = runner.invoke(app, ["resume"])
+    assert r.exit_code == 0 and cli._engine().st.status == "waiting_agent"

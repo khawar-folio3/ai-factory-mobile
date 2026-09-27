@@ -16,3 +16,6 @@ A human approves the spec at the plan gate.
 
 When ANSWERS is given, those are the developer's decisions: use them, do not ask them again. Ask only
 what the ticket and code cannot tell you, short and specific.
+
+- Shell: cap command output (`| tail -40`, `head`, `sed -n 'a,bp'`), quote globs, read files by line range
+  instead of whole files.

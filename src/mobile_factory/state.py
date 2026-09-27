@@ -28,8 +28,9 @@ class GateRecord(BaseModel):
 class RunState(BaseModel):
     id: str
     ticket: str
-    pipeline: str = "bugfix"  # the workflow
+    pipeline: str = "light"  # the workflow
     workflow_source: str = ""  # jira | text | override
+    kind: str = ""  # a code ticket: bugfix | task | feature (names the branch)
     workflow_reason: str = ""
     created_at: str
     updated_at: str
@@ -40,7 +41,6 @@ class RunState(BaseModel):
     branch: str = ""
     checkpoint: str = ""
     fix_attempts: int = 0
-    review_rounds: int = 0
     question_rounds: int = 0
     signals: RiskSignals = Field(default_factory=RiskSignals)
     risk: RiskAssessment | None = None
@@ -50,6 +50,8 @@ class RunState(BaseModel):
     stop_reason: str = ""
     pr_url: str = ""
     history: list[str] = Field(default_factory=list)
+    enabled: list[str] = Field(default_factory=list)  # optional steps turned on for this run (`factory run --tests`)
+    started: dict[str, float] = Field(default_factory=dict)  # step -> epoch its current attempt began
 
     @property
     def level(self) -> int:

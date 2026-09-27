@@ -350,7 +350,7 @@ class Wizard:
         if check and saved:
             p.say(f"  ok  agent: {' + '.join(saved)}  (Machine tools checks its CLI and login)")
             return
-        p.say("  runs the agent steps (triage, fix, review, taste distill); Machine tools installs and logs in its CLI")
+        p.say("  runs the agent steps (work, research, taste distill); Machine tools installs and logs in its CLI")
         options = [
             f"Claude Code{'  (installed)' if claude else ''}",
             f"Cursor{'  (installed)' if cursor else ''}",

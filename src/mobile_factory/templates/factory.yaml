@@ -8,8 +8,7 @@ project:
   platform: android
   base_branch: __BASE__          # or "ask": pass --base on every run
   branch_pattern: "bugfix/{key}-{slug}"
-  branch_pattern_by_type:
-    Task: "feature/{key}-{slug}"
+  branch_pattern_by_type: {}     # ticket type -> pattern; default "{kind}/{key}-{slug}" (bugfix | task | feature)
   forbidden_paths:               # the fix may never touch these
     - "**/build.gradle*"
     - "gradle/**"
@@ -34,16 +33,15 @@ autonomy:
   thresholds: {4: 15, 3: 35, 2: 55, 1: 75}
 
 gates:                           # a gate is automatic when the run's level >= auto_at (5 = always human)
+                                 # code tickets only stop at pr; plan (the spec) gates a new app
   plan:   {auto_at: 1}
-  repro:  {auto_at: 2}
-  diff:   {auto_at: 3}
-  review: {auto_at: 3}
   pr:     {auto_at: 4}
+
+steps:                           # unit_tests: the work step also adds unit tests (or `factory run <KEY> --tests`)
+  unit_tests: false
 
 limits:
   max_fix_attempts: 2
-  max_review_rounds: 2
-  require_repro: true
   rollback_on_fail: true
 
 tracker:

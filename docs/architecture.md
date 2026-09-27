@@ -14,7 +14,7 @@ agent ──▶ │ next / submit ──▶ Engine ──▶ auto nodes (git, gh
   │       │                     │  └─▶ EventBus ─▶ events.jsonl ─▶ metrics · Slack · pixels  │
   └────── │ instructions (TASK, SKILL, LAST FAILURE, SUBMIT)                                  │
           └───────────────────────────────────────────────────────────────────────────────────┘
-human ──▶ factory gate / approve / reject   (TTY only)
+human ──▶ factory next / approve / reject   (TTY only)
 ```
 
 ## Modules
@@ -22,7 +22,7 @@ human ──▶ factory gate / approve / reject   (TTY only)
 | Module | Responsibility |
 |---|---|
 | `pipeline.py` | `Engine`: node graph, `advance()` / `submit()` / `decide()`, retries, rollback, publish guards |
-| `outputs.py` | Pydantic schemas for each agent step (`factory schema <node>`) |
+| `outputs.py` | Pydantic schemas for each agent step (listed by an invalid `factory submit`) |
 | `autonomy.py` | Risk signals → score → allowed level; gate thresholds |
 | `state.py` | `RunState` persisted atomically to `.factory/runs/<id>/state.json`; resumable |
 | `config.py` | `factory.yaml` schema, `${VAR}` interpolation, secrets file, plaintext-secret refusal |
@@ -40,14 +40,15 @@ human ──▶ factory gate / approve / reject   (TTY only)
 |---|---|---|---|
 | preflight | auto | | clean tree, base branch fetched, `gh` authenticated |
 | intake | auto | | ticket fetched and trimmed to `ticket.json`; type/label/project filters |
-| triage | agent | plan | eligibility verdict, root-cause hypothesis, plan → first risk score |
+| triage | agent | | eligibility verdict, root-cause hypothesis, plan → first risk score |
 | branch | auto | | branch from `origin/<base>`, **checkpoint** recorded, optional tracker transition |
-| reproduce | agent | repro | device snapshots of the faulty state and adjacent screens |
-| fix | agent | diff | code change; hard limits; risk re-scored from the real diff |
-| checks | auto | | lint + unit tests of touched modules, extra commands, build + install |
+| reproduce | agent | | device snapshots of the faulty state and adjacent screens |
+| fix | agent | | code change; hard limits; risk re-scored from the real diff |
+| unit_tests | agent | | optional (`steps: {unit_tests: true}` or `--tests`): pure-logic tests only |
+| checks | auto | | lint + unit tests of touched modules, extra commands, build + `adb install -r` (sign-in kept) |
 | verify | agent | | same snapshots after the fix; defect changed, neighbours unchanged |
-| commit | auto | | one commit (amended on later rounds); guardrail context prepared |
-| review | agent | review | findings vs taste/knowledge/detectors; applied fixes loop back to checks |
+| commit | auto | | one commit of the reviewed diff (no client-switch files, refuses TEMP markers) |
+| review | agent | | one round; applied fixes get lint + tests again, open findings go into the PR body |
 | pr_preview | auto | pr | PR body rendered, publish guards checked, preview hashed |
 | publish | auto | | refuses unless the approved preview hash still matches; push + draft PR |
 | handoff | auto | | outcome recorded |

@@ -8,10 +8,12 @@ Works with **Claude Code** and **Cursor** (and any agent that can run a shell), 
 Python runner, not in a prompt.
 
 ```
-ticket ─▶ triage ─◆plan─▶ branch ─▶ reproduce ─◆repro─▶ fix ─◆diff─▶ checks ─▶ verify ─▶ commit ─▶ review ─◆review─▶ PR preview ─◆pr─▶ draft PR
-                                       ▲  device                 ▲        lint/tests  device              guardrail
-                                       │                          └──── retry with the failure (N times), then roll back ◀──┘
-◆ = gate: automatic or human, decided per run by risk score × autonomy ceiling
+ticket ─▶ triage ─▶ branch ─▶ reproduce ─▶ fix ─▶ (unit tests) ─▶ checks ─▶ verify ─▶ commit ─▶ review ─▶ PR preview ─◆pr─▶ draft PR
+                              device       ▲                   lint/tests  device             one round:
+                                           │                   + install                     fixes re-checked
+                                           └── retry with the failure (N times), then roll back   (lint/tests only)
+◆ = gate: automatic or human, decided per run by risk score × autonomy ceiling. bugfix, task and feature stop only
+    at the draft PR; open review findings and blocked criteria are listed in its body.
 ```
 
 > Status: **alpha (v0.1)**. Android is supported end to end. iOS is on the roadmap behind the same `Platform` interface.
@@ -56,7 +58,7 @@ Then ask the agent: *"fix APP-123 with the factory"*. The agent loops `factory n
 When a gate needs you, it stops and tells you to run, in your own terminal:
 
 ```bash
-factory gate            # what you are approving
+factory next            # what you are approving
 factory approve plan    # type the shown code to confirm (refused without a TTY, so the agent cannot self-approve)
 ```
 
@@ -78,7 +80,7 @@ reproduction confidence and missing tests. The run's level is `min(ceiling, leve
 | 4 autonomous | auto | auto | auto | auto | auto → **draft** PR |
 
 A copy fix in one file scores ~0 and can run hands-off; a change touching auth scores ≥ 40 and drops to supervised no
-matter the ceiling. `factory risk` explains every point. A reviewer's *dismissed* blocker always gets a human, at any
+matter the ceiling. `factory status` explains every point. A reviewer's *dismissed* blocker always gets a human, at any
 level. Nothing is ever merged or marked ready. Details: [docs/autonomy.md](docs/autonomy.md).
 
 ## The guardrail
@@ -89,7 +91,8 @@ The review step is a gate, not a suggestion:
    `tools:ignore`, `swiftlint:disable`…), deleted tests. Any hit stops the run.
 2. **AI-slop detectors** (deterministic, on added lines): narrating comments, commented-out code, debug prints, `!!`,
    force unwraps, swallowed exceptions, `GlobalScope`, `Thread.sleep`, hardcoded strings… Every blocker/major must be
-   answered: applied, not applied (stops the run) or dismissed (forces a human).
+   answered: applied, not applied or dismissed; an open or dismissed blocker/major is listed in the draft PR and
+   forces a human at the PR gate.
 3. **Owner taste**: `factory guardrail learn` harvests your code owners' comments from merged PRs; the agent distills
    them into `.factory/taste.md` — rules with ids, globs, keywords and PR evidence, approved by the owner like code.
 4. **Tribal knowledge**: `.factory/knowledge/*.md`, same format, hand-written.
@@ -125,7 +128,7 @@ as a character: steps are tools it works on, gates are permission prompts it wai
 | `run <KEY>`, `next`, `submit <node> <file>`, `schema <node>`, `resume` | the agent loop |
 | `gate`, `approve <gate>`, `reject <gate>`, `abort` | humans |
 | `status`, `risk`, `events`, `metrics` | visibility |
-| `snap before/after <label>`, `snap diff`, `android install/where/tap/wait/open/back/flow` | device |
+| `snap before/after <label>`, `snap diff`, `android install/where/route/tap/wait/open/back/flow` | device |
 | `guardrail learn/review/check` | code review outside a run |
 | `eval add/prepare/score/report` | measurement |
 

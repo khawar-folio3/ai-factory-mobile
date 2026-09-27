@@ -48,7 +48,7 @@ def test_install_writes_only_to_the_user_home(tmp_path: Path, monkeypatch: pytes
     adapters.install(c, "cursor")
     assert _repo_files(tmp_path) == before  # the repo is never touched
     assert (home / ".claude/skills/factory/SKILL.md").read_text().startswith("---\nname: factory\n")
-    assert (home / ".cursor/skills/factory-review/SKILL.md").read_text().startswith("---\nname: factory-review\n")
+    assert (home / ".cursor/skills/factory-spec/SKILL.md").read_text().startswith("---\nname: factory-spec\n")
     assert registered[0] == ["atlassian", "figma", "gh", "local"]  # Claude: local scope, kept in ~/.claude.json
     assert {"figma", "gh"} <= json.loads((home / ".cursor/mcp.json").read_text())["mcpServers"].keys()
     allowed = json.loads((home / ".claude/settings.json").read_text())["permissions"]["additionalDirectories"]
@@ -56,14 +56,14 @@ def test_install_writes_only_to_the_user_home(tmp_path: Path, monkeypatch: pytes
 
 
 def test_claude_subagents_carry_per_step_models(tmp_path: Path) -> None:
-    (tmp_path / "factory.yaml").write_text("version: 1\nproject: {name: d}\nagents: {models: {fix: sonnet}}\n")
+    (tmp_path / "factory.yaml").write_text("version: 1\nproject: {name: d}\nagents: {models: {spec: sonnet}}\n")
     adapters.install(config.load(tmp_path), "claude")
     agents = adapters.agent_home() / ".claude/agents"
-    fix = (agents / "factory-fix.md").read_text()
-    assert fix.startswith("---\nname: factory-fix\n") and "\nmodel: sonnet\n" in fix  # override
-    assert "\nmodel: haiku\n" in (agents / "factory-review-detectors.md").read_text()  # default kept
-    assert "Read-only" in (agents / "factory-review-taste.md").read_text()
-    assert "Read-only" not in fix and "Never run `factory submit`" in fix
+    spec = (agents / "factory-spec.md").read_text()
+    assert spec.startswith("---\nname: factory-spec\n") and "\nmodel: sonnet\n" in spec  # override
+    assert "\nmodel: opus\n" in (agents / "factory-split.md").read_text()  # default kept
+    assert "Read-only" in (agents / "factory-learn-tally.md").read_text()
+    assert "Read-only" not in spec and "Never run `factory submit`" in spec
     assert not (agents / "factory-factory.md").exists()  # the driver stays a skill
 
 
@@ -73,10 +73,10 @@ def test_cursor_subagents_map_tiers_to_cursor_ids(tmp_path: Path) -> None:
     )
     adapters.install(config.load(tmp_path), "cursor")
     agents = adapters.agent_home() / ".cursor/agents"
-    assert "\nmodel: my-opus-id\n" in (agents / "factory-fix.md").read_text()
-    assert "\nmodel: inherit\n" in (agents / "factory-triage.md").read_text()  # sonnet not mapped yet
-    assert "Read-only" in (agents / "factory-locate.md").read_text()  # told, not flagged: it must write its file
-    assert "readonly" not in (agents / "factory-review-taste.md").read_text()
+    assert "\nmodel: my-opus-id\n" in (agents / "factory-spec.md").read_text()
+    assert "\nmodel: inherit\n" in (agents / "factory-learn-tally.md").read_text()  # sonnet not mapped yet
+    assert "Read-only" in (agents / "factory-learn-tally.md").read_text()  # told, not flagged: it must write its file
+    assert "readonly" not in (agents / "factory-learn-tally.md").read_text()
 
 
 def test_event_log_survives_a_failing_sink(tmp_path: Path) -> None:

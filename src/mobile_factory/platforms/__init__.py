@@ -7,5 +7,5 @@ from .base import Platform
 
 def make(lc: LoadedConfig) -> Platform:
     if lc.cfg.project.platform == "android":
-        return Android(lc.root, lc.cfg.android)
+        return Android(lc.root, lc.cfg.android, lc.state_dir / "build")
     raise NotImplementedError(f"platform {lc.cfg.project.platform}")

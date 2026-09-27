@@ -24,7 +24,7 @@ def approve(eng: Engine, gate: str) -> None:
 
 def test_every_workflow_is_well_formed() -> None:
     wfs = workflow.all_workflows()
-    assert set(wfs) == {"bugfix", "task", "feature", "spike", "epic", "new-app"}
+    assert set(wfs) == {"light", "spike", "epic", "new-app"}
     from mobile_factory.outputs import EXAMPLES, MODELS
     from mobile_factory.pipeline import AUTO, POST
 
@@ -50,16 +50,9 @@ def test_bad_definitions_are_rejected() -> None:
 
 def test_ticket_types_route_to_workflows(repo: Path) -> None:
     tc = load(repo).cfg.tracker
-    assert [route(tc, t) for t in ("Bug", "Task", "Story", "Spike", "Epic", "App", "")] == [
-        "bugfix",
-        "task",
-        "feature",
-        "spike",
-        "epic",
-        "new-app",
-        "bugfix",
-    ]
-    assert route(tc, "Sub-task", "Story") == "feature" and route(tc, "Sub-task", "Bug") == "bugfix"
+    types = ("Bug", "Task", "Story", "Improvement", "Spike", "Epic", "App", "")
+    assert [route(tc, t) for t in types] == ["light"] * 4 + ["spike", "epic", "new-app", "light"]
+    assert route(tc, "Sub-task", "Story") == "light" and route(tc, "Sub-task", "Epic") == "epic"
     with pytest.raises(Exception, match="no parent with a workflow"):
         route(tc, "Sub-task", "")
 
@@ -71,93 +64,17 @@ def test_unmapped_type_stops_with_the_reason(repo: Path, fake: FakePlatform) -> 
     assert eng.st.status == "stopped" and "no workflow for ticket type Incident" in eng.st.stop_reason
 
 
-# ---------- feature ----------
-
-PLAN = {
-    "verdict": "eligible",
-    "reason": "one screen",
-    "summary": "Taller avatar on profile",
-    "acceptance_criteria": ["Avatar is 64dp tall", "Profile still opens"],
-    "plan": ["change height"],
-    "screens": ["profile"],
-    "estimated_files": 1,
+SPEC = {
+    "summary": "Visitor check-in for front desks",
+    "screens": ["home"],
+    "acceptance_criteria": ["Home lists today's visitors"],
 }
-
-
-def test_feature_goes_from_criteria_to_a_draft_pr(repo: Path, fake: FakePlatform) -> None:
-    ticket(repo, "APP-2", "Story", "Taller avatar")
-    eng = Engine.start(load(repo), "APP-2")
-    assert eng.st.pipeline == "feature"
-    eng.advance()
-    assert eng.st.node == "plan" and "SCOUT" in eng.instructions()
-    eng.submit("plan", PLAN)
-    assert eng.st.node == "baseline" and "ALONGSIDE start `factory-history`" in eng.instructions()
-    fake.snapshot(eng.dir / "snapshots", "before", "profile")
-    eng.submit("baseline", {"snapshots": ["profile"], "steps": ["open Profile"]})
-    assert eng.st.node == "implement"
-    (repo / "app/src/main/java/Profile.kt").write_text("class Profile {\n    val height = 64\n}\n")
-    eng.submit(
-        "implement", {"summary": "Make the profile avatar 64dp", "changes": "height 48 -> 64", "tests_added": True}
-    )
-    assert eng.st.node == "accept"
-    fake.snapshot(eng.dir / "snapshots", "after", "profile")
-    eng.submit(
-        "accept",
-        {
-            "criteria": [
-                {"criterion": "Avatar is 64dp tall", "met": True, "evidence": "snap profile"},
-                {"criterion": "Profile still opens", "met": True, "evidence": "snap profile"},
-            ],
-            "snapshots": ["profile"],
-        },
-    )
-    assert eng.st.node == "review"
-    eng.submit("review", {"findings": []})
-    assert eng.st.status == "done" and eng.st.outcome == "draft-pr", eng.instructions()
-    assert eng.st.branch.startswith("feature/APP-2-")
-    assert git(repo, "log", "-1", "--format=%s") == "APP-2: Make the profile avatar 64dp"
-    body = Path(eng.out("pr_preview")["file"]).read_text()
-    assert "## Acceptance criteria" in body and "- [x] Avatar is 64dp tall" in body and "Root cause" not in body
-
-
-def test_feature_rejects_unchecked_criteria_and_retries_failed_ones(repo: Path, fake: FakePlatform) -> None:
-    ticket(repo, "APP-3", "Story", "Taller avatar")
-    eng = Engine.start(load(repo), "APP-3")
-    eng.advance()
-    eng.submit("plan", PLAN)
-    fake.snapshot(eng.dir / "snapshots", "before", "profile")
-    eng.submit("baseline", {"snapshots": ["profile"]})
-    (repo / "app/src/main/java/Profile.kt").write_text("class Profile {\n    val height = 64\n}\n")
-    eng.submit("implement", {"summary": "Make the profile avatar 64dp", "changes": "height 48 -> 64"})
-    one = {"criteria": [{"criterion": "Avatar is 64dp tall", "met": True, "evidence": "snap"}]}
-    with pytest.raises(Exception, match="acceptance criteria not checked: Profile still opens"):
-        eng.submit("accept", one)
-    both_bad = {
-        "criteria": [
-            {"criterion": "Avatar is 64dp tall", "met": False, "evidence": "still 48dp"},
-            {"criterion": "Profile still opens", "met": True, "evidence": "snap"},
-        ]
-    }
-    eng.submit("accept", both_bad)
-    assert eng.st.node == "implement" and "acceptance failed: Avatar is 64dp tall" in eng.instructions()
-
-
-def test_too_big_story_asks_split_or_one_pr(repo: Path, fake: FakePlatform) -> None:
-    from mobile_factory.pipeline import ONE_PR, SPLIT
-
-    ticket(repo, "APP-4", "Story", "Redo the whole app")
-    eng = Engine.start(load(repo), "APP-4")
-    eng.advance()
-    eng.submit("plan", {**PLAN, "verdict": "too-big", "subtasks": ["part one", "part two"]})
-    assert eng.st.status == "waiting_answers" and eng.out("_ask")["choices"] == [SPLIT, ONE_PR]
-    eng.answer([ONE_PR])
-    assert eng.st.node == "plan" and ONE_PR in eng.answers_file.read_text()
-    eng.submit("plan", {**PLAN, "verdict": "too-big", "subtasks": ["part one", "part two"]})
-    eng.answer([SPLIT])
-    assert eng.st.outcome == "too-big" and (eng.dir / "subtasks.md").read_text() == "- part one\n- part two\n"
-
-
-# ---------- spike ----------
+ARCH = {
+    "summary": "Compose app",
+    "platform": "android-kotlin-compose",
+    "modules": ["app"],
+    "decisions": [{"topic": "DI", "choice": "Hilt"}],
+}
 
 
 def test_spike_posts_an_approved_report_and_touches_no_code(repo: Path, fake: FakePlatform) -> None:
@@ -230,101 +147,73 @@ def test_new_app_goes_spec_architecture_first_slice_then_backlog(repo: Path, fak
         },
     )
     approve(eng, "architecture")
-    assert eng.st.node == "scaffold"
+    assert eng.st.node == "scaffold" and "delegate to the `factory-scaffold` subagent (opus)" in eng.instructions()
     (repo / "app/src/main/java/Home.kt").write_text("class Home\n")
-    eng.submit("scaffold", {"summary": "Create the check-in app with its home screen", "changes": "project + home"})
-    approve(eng, "diff")
-    fake.snapshot(eng.dir / "snapshots", "after", "home")
-    eng.submit(
-        "accept",
-        {
-            "criteria": [{"criterion": "Home lists today's visitors", "met": True, "evidence": "snap home"}],
-            "snapshots": ["home"],
-        },
-    )
-    eng.submit("review", {"findings": []})
-    approve(eng, "review")
+    flow = eng.flow("scaffold")
+    flow.parent.mkdir(parents=True, exist_ok=True)
+    flow.write_text("appId: com.x\n---\n# criterion 1: Home lists today's visitors\n- assertVisible: Today\n")
+    crit = [{"criterion": "Home lists today's visitors", "met": True, "evidence": "criterion 1 passed"}]
+    out = {"summary": "Create the check-in app with its home screen", "acceptance_criteria": crit, "flow": str(flow)}
+    eng.submit("scaffold", out)
     approve(eng, "pr")
     assert eng.st.status == "done" and eng.st.outcome == "draft-pr", eng.instructions()
     assert eng.out("create_tickets")["created"] == ["APP-11"]  # the rest of the spec, as stories
     assert "Print a visitor badge" in (config.state_dir(repo) / "tickets/APP-11.md").read_text()
 
 
-def test_task_checks_done_criteria_without_a_device_step(repo: Path, fake: FakePlatform) -> None:
-    ticket(repo, "APP-20", "Task", "Clean up Profile")
-    eng = Engine.start(load(repo), "APP-20")
-    assert eng.st.pipeline == "task"
-    eng.advance()
-    eng.submit(
-        "plan",
-        {
-            **PLAN,
-            "summary": "Bump OkHttp to 5.1",
-            "acceptance_criteria": ["OkHttp is 5.1", "Unit tests pass"],
-            "screens": [],
-        },
-    )
-    assert eng.st.node == "implement"  # no baseline or reproduce for technical work
-    (repo / "app/src/main/java/Profile.kt").write_text("class Profile {\n    val height = 48 // cleaned up\n}\n")
-    eng.submit("implement", {"summary": "Bump OkHttp to 5.1", "changes": "version catalog"})
-    eng.submit(
-        "accept",
-        {
-            "criteria": [
-                {"criterion": "OkHttp is 5.1", "met": True, "evidence": "gradle dependencies"},
-                {"criterion": "Unit tests pass", "met": True, "evidence": "checks step"},
-            ]
-        },
-    )
-    eng.submit("review", {"findings": []})
-    assert eng.st.status == "done" and eng.st.outcome == "draft-pr", eng.instructions()
-    assert eng.st.branch.startswith("task/APP-20-")
-
-
 @pytest.mark.parametrize(
     "case",
     [
-        (
-            "Task",
-            "Crash when opening Profile",
-            "Steps to reproduce: open Profile. Expected: opens. Actual: crash.",
-            "bugfix",
-            "text",
-        ),
-        ("Story", "Investigate: should we drop the legacy map SDK?", "Evaluate the options.", "spike", "text"),
-        ("Task", "Bump OkHttp to 5.1", "Upgrade okhttp from 4.12 to 5.1.", "task", "jira"),
+        ("Task", "Crash when opening Profile", "Steps to reproduce: open Profile. Actual: crash.", "light", "bugfix"),
+        ("Story", "Investigate: should we drop the legacy map SDK?", "Evaluate the options.", "spike", "feature"),
+        ("Task", "Bump OkHttp to 5.1", "Upgrade okhttp from 4.12 to 5.1.", "light", "task"),
         (
             "Story",
             "Favourites filter",
-            "As a user, I want to filter spaces. Acceptance criteria: chip shows.",
+            "As a user, I want to filter spaces. Acceptance criteria: chip.",
+            "light",
             "feature",
-            "jira",
         ),
-        ("", "App crashes on launch", "Steps to reproduce: launch. Actual: crash.", "bugfix", "text"),
+        ("", "App crashes on launch", "Steps to reproduce: launch. Actual: crash.", "light", "bugfix"),
     ],
 )
-def test_workflow_is_detected_from_the_text(repo: Path, case: tuple[str, str, str, str, str]) -> None:
-    jira, summary, body, want, source = case
+def test_workflow_and_kind_are_detected_from_the_text(repo: Path, case: tuple[str, str, str, str, str]) -> None:
+    jira, summary, body, want, kind = case
     from mobile_factory.integrations.tracker import Ticket
     from mobile_factory.pipeline import detect_workflow
 
     d = detect_workflow(load(repo).cfg.tracker, Ticket(key="APP-1", type=jira, summary=summary, description=body))
-    assert (d.workflow, d.source) == (want, source), d
+    assert (d.workflow, d.kind) == (want, kind), d
 
 
-def test_a_bug_filed_as_a_task_runs_the_bug_workflow_and_says_why(repo: Path, fake: FakePlatform) -> None:
+def test_code_tickets_run_light_with_their_kind(repo: Path, fake: FakePlatform) -> None:
+    lc = load(repo)
+    for key, type_, kind in (("APP-20", "Bug", "bugfix"), ("APP-21", "Task", "task"), ("APP-22", "Story", "feature")):
+        ticket(repo, key, type_, "Taller avatar")
+        eng = Engine.start(lc, key)
+        assert (eng.st.pipeline, eng.st.kind) == ("light", kind)
     ticket(repo, "APP-30", "Task", "Crash when opening Profile", "Steps to reproduce: open Profile. Actual: crash.")
-    eng = Engine.start(load(repo), "APP-30")
+    eng = Engine.start(lc, "APP-30")
     eng.advance()
-    assert eng.st.pipeline == "bugfix" and eng.st.node == "triage"
-    assert eng.st.workflow_source == "text" and "reads like bugfix, not task" in eng.st.workflow_reason
+    assert (eng.st.pipeline, eng.st.kind, eng.st.node) == ("light", "bugfix", "work")
+    assert eng.st.branch.startswith("bugfix/APP-30-")
+
+
+def test_light_workflow_order_and_gates() -> None:
+    wf = workflow.get("light")
+    assert wf.names == [
+        "preflight", "intake", "branch", "work", "checks", "review", "commit", "pr_preview", "publish", "handoff"
+    ]  # fmt: skip
+    assert [s.gate for s in wf.steps if s.gate] == ["pr"]
+    assert [s.name for s in wf.steps if s.kind == "agent"] == ["work"] and wf.step("work").params["solo"]
+    assert wf.step("review").type == "detectors" and wf.step("checks").retry_to == "work"
 
 
 def test_workflow_can_be_forced(repo: Path, fake: FakePlatform) -> None:
     ticket(repo, "APP-31", "Task", "Crash when opening Profile", "Steps to reproduce: open Profile.")
-    eng = Engine.start(load(repo), "APP-31", workflow_name="task")
+    eng = Engine.start(load(repo), "APP-31", workflow_name="spike")
     eng.advance()
-    assert eng.st.pipeline == "task" and eng.st.node == "plan" and eng.st.workflow_source == "override"
+    assert eng.st.pipeline == "spike" and eng.st.node == "research" and eng.st.workflow_source == "override"
 
 
 # ---------- your own workflows ----------
@@ -334,47 +223,42 @@ def test_extends_with_changes_and_a_custom_step(repo: Path, fake: FakePlatform) 
     folder = workflow.folders(repo)[-1]
     folder.mkdir(parents=True)
     (folder / "hotfix.yaml").write_text(
-        "extends: bugfix\nmax_level: 1\nchanges:\n"
-        "  - add: {name: analytics, kind: agent, type: custom, skill: analytics-check, retry_to: fix,\n"
-        "          task: Check the screen_view events.}\n    after: fix\n"
-        "  - set: review\n    model: haiku\n"
-        "  - remove: pr_preview\n"
+        "extends: light\nmax_level: 1\nchanges:\n"
+        "  - add: {name: analytics, kind: agent, type: custom, skill: analytics-check, retry_to: work,\n"
+        "          task: Check the screen_view events.}\n    after: work\n"
+        "  - set: work\n    model: haiku\n"
+        "  - remove: review\n"
     )
     (folder / "analytics-check.md").write_text("# Analytics check\n")
     wf = workflow.get("hotfix", repo)
     names = wf.names
-    assert names.index("analytics") == names.index("fix") + 1 and "pr_preview" not in names
-    assert wf.step("review").model == "haiku" and wf.max_level == 1
+    assert names.index("analytics") == names.index("work") + 1 and "review" not in names
+    assert wf.step("work").model == "haiku" and wf.max_level == 1
     assert wf.step("analytics").skill_file.endswith("analytics-check.md")
-    assert wf.artifact("change") == "fix"  # inherited
+    assert wf.artifact("change") == "work"  # inherited
 
     from mobile_factory.wizard import write_local
 
     write_local(repo, {"tracker": {"pipelines": {"Bug": "hotfix"}}})
-    assert route(load(repo).cfg.tracker, "Story") == "feature"  # yours are merged onto the defaults
+    assert route(load(repo).cfg.tracker, "Story") == "light"  # yours are merged onto the defaults
     eng = Engine.start(load(repo), "APP-1")
     assert eng.st.pipeline == "hotfix" and eng.st.ceiling == 1
     eng.advance()
-    eng.submit("triage", {"verdict": "eligible", "reason": "clear", "summary": "Avatar clipped", "estimated_files": 1})
-    approve(eng, "repro") if eng.st.status == "waiting_gate" else None
-    fake.snapshot(eng.dir / "snapshots", "before", "profile")
-    if eng.st.node == "reproduce":
-        eng.submit("reproduce", {"reproduced": True, "confidence": 0.9, "steps": ["open"], "snapshots": ["profile"]})
-    if eng.st.status == "waiting_gate":
-        approve(eng, eng.node().gate or "")
     (repo / "app/src/main/java/Profile.kt").write_text("class Profile {\n    val height = 64\n}\n")
-    eng.submit("fix", {"summary": "Wrap avatar height", "root_cause": "fixed height", "changes": "48 -> 64"})
-    if eng.st.status == "waiting_gate":
-        approve(eng, "diff")
+    flow = eng.flow("work")
+    flow.parent.mkdir(parents=True, exist_ok=True)
+    flow.write_text("appId: com.x\n---\n# criterion 1: Avatar shows\n- assertVisible: avatar\n")
+    crit = [{"criterion": "Avatar shows", "met": True, "evidence": "criterion 1 passed"}]
+    eng.submit("work", {"summary": "Wrap avatar height", "acceptance_criteria": crit, "flow": str(flow)})
     assert eng.st.node == "analytics" and "analytics-check.md" in eng.instructions()
     eng.submit("analytics", {"summary": "screen_view missing", "ok": False})
-    assert eng.st.node == "fix" and "screen_view missing" in eng.instructions()  # ok: false retried
+    assert eng.st.node == "work" and "screen_view missing" in eng.instructions()  # ok: false retried
 
 
 def test_a_broken_workflow_stops_the_run_with_the_reason(repo: Path) -> None:
     folder = workflow.folders(repo)[-1]
     folder.mkdir(parents=True)
-    (folder / "bugfix.yaml").write_text(
+    (folder / "light.yaml").write_text(
         "steps:\n  - {name: preflight}\n  - {name: dance, kind: agent, type: tango, task: Dance.}\n  - {name: handoff}\n"
     )
     with pytest.raises(Exception, match="unknown step types: dance"):
@@ -390,8 +274,8 @@ def test_wizard_runs_agent_steps_asks_at_gates_pauses_and_picks_up(
 
     from mobile_factory import cli
 
-    ticket(repo, "APP-40", "Story", "Taller avatar")
-    outputs = {"plan": PLAN}
+    ticket(repo, "APP-40", "App", "Visitor check-in app")
+    outputs: dict[str, object] = {"spec": SPEC}
     calls: list[str] = []
 
     def fake_agent(cmds: list[list[str]], cwd: Path, logs: list[Path], stage: object, **_: object) -> int:
@@ -412,16 +296,15 @@ def test_wizard_runs_agent_steps_asks_at_gates_pauses_and_picks_up(
     eng.advance()
     with pytest.raises(typer.Exit):
         cli._wizard(eng)
-    assert calls == ["plan"] and eng.st.status == "waiting_gate" and eng.node().gate == "plan"
+    assert calls == ["spec"] and eng.st.status == "waiting_gate" and eng.node().gate == "plan"
 
     again = Engine.load(load(repo), eng.st.id)  # later: `factory run APP-40` picks it up
     monkeypatch.setattr(cli, "_choose", lambda q, options, default: 0)  # approve
-    outputs["baseline"] = {"snapshots": ["profile"]}
-    fake.snapshot(again.dir / "snapshots", "before", "profile")
-    with pytest.raises(typer.Exit):  # the next agent step has no scripted output: it stops, saved
+    outputs["architecture"] = ARCH
+    with pytest.raises(typer.Exit):  # the next gate is approved, then scaffold has no scripted output: saved
         cli._wizard(again)
-    assert again.st.gates["plan"].decision == "approved" and "baseline" in calls
-    assert Engine.load(load(repo), eng.st.id).st.node == "implement"  # progress was saved
+    assert again.st.gates["plan"].decision == "approved" and "architecture" in calls
+    assert Engine.load(load(repo), eng.st.id).st.node == "scaffold"  # progress was saved
 
 
 def test_wizard_asks_the_questions_inline(repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -431,12 +314,12 @@ def test_wizard_asks_the_questions_inline(repo: Path, fake: FakePlatform, monkey
 
     from mobile_factory import cli
 
-    ticket(repo, "APP-41", "Story", "Taller avatar")
-    plans = [{**PLAN, "verdict": "needs-info", "questions": ["How tall?", "Which screens?"]}, PLAN]
+    ticket(repo, "APP-41", "App", "Visitor check-in app")
+    plans = [{**SPEC, "verdict": "needs-info", "questions": ["How tall?", "Which screens?"]}, SPEC]
 
     def fake_agent(cmds: list[list[str]], cwd: Path, logs: list[Path], stage: object, **_: object) -> int:
         prompt = cmds[0][2]
-        if "outputs/plan.json" not in prompt or not plans:
+        if "outputs/spec.json" not in prompt or not plans:
             return 1
         if len(plans) == 1:
             assert "ANSWERS" in prompt  # the second plan run sees the answers

@@ -8,7 +8,6 @@ steps:
     title: Split into stories
     kind: agent
     gate: tickets
-    scout: true
     task: >-
       Split the epic into stories that each fit one PR and deliver something a user can see or a test can prove. Each
       story gets a summary, a short description and acceptance criteria; order them so each builds on the last.

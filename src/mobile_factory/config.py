@@ -97,12 +97,9 @@ class GateConfig(_Model):
 
 
 def _default_gates() -> dict[str, GateConfig]:
-    return {
+    return {  # code tickets only gate the PR; plan (the spec) and architecture gate a new app
         "plan": GateConfig(auto_at=1),
-        "repro": GateConfig(auto_at=2),
-        "diff": GateConfig(auto_at=3),
-        "review": GateConfig(auto_at=3),
-        "pr": GateConfig(auto_at=4),
+        "pr": GateConfig(auto_at=4),  # the one human gate by default: the draft PR
         "report": GateConfig(auto_at=5),  # posting to a ticket: always a human
         "tickets": GateConfig(auto_at=5),  # creating tickets: always a human
         "architecture": GateConfig(auto_at=5),  # a new app's stack: always a human
@@ -111,19 +108,17 @@ def _default_gates() -> dict[str, GateConfig]:
 
 class LimitsConfig(_Model):
     max_fix_attempts: int = Field(2, ge=0, le=5)
-    max_review_rounds: int = Field(2, ge=1, le=5)
-    require_repro: bool = True
     rollback_on_fail: bool = True
 
 
 DEFAULT_PIPELINES = {  # ticket type -> workflow
-    "Bug": "bugfix",
-    "Task": "task",
+    "Bug": "light",
+    "Task": "light",
     "Sub-task": "parent",  # a sub-task runs its parent's workflow
     "Subtask": "parent",
-    "Story": "feature",
-    "Improvement": "feature",
-    "New Feature": "feature",
+    "Story": "light",
+    "Improvement": "light",
+    "New Feature": "light",
     "Spike": "spike",
     "Epic": "epic",
     "App": "new-app",
@@ -170,29 +165,14 @@ class GuardrailConfig(_Model):
 
 
 # haiku | sonnet | opus | inherit, or a full model id. Steps not listed run on the session's model.
-DEFAULT_MODELS = {
-    "triage": "sonnet",
-    "reproduce": "sonnet",
-    "fix": "opus",
-    "verify": "opus",
-    "review": "opus",
-    "review-correctness": "opus",
-    "review-taste": "sonnet",
-    "review-detectors": "haiku",
+DEFAULT_MODELS = {  # the light workflow's work step runs in the driving session, on its model
     "guardrail-learn": "sonnet",
     "learn-tally": "sonnet",
-    "locate": "sonnet",
-    "plan": "opus",
-    "baseline": "sonnet",
-    "implement": "opus",
-    "accept": "sonnet",
     "research": "opus",
     "split": "opus",
     "spec": "opus",
     "architecture": "opus",
     "scaffold": "opus",
-    "history": "haiku",  # git log/blame and past PRs: facts, no judgement
-    "scout": "haiku",  # greps, git history, CLI output: mechanical work stays on the cheapest tier
 }
 
 
@@ -201,8 +181,8 @@ class AgentsConfig(_Model):
         default_factory=lambda: list[Literal["claude", "cursor"]](["claude"])
     )  # per developer (local.yaml)
     models: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_MODELS))
-    parallel: bool = True  # fan independent sub-tasks out to subagents at once (Claude Code, Cursor 2.4+)
-    max_parallel: int = 16  # upper bound on subagents started at once; work is split as finely as this allows
+    parallel: bool = True  # guardrail learn: tally the reviews in parallel subagents (Claude Code, Cursor 2.4+)
+    max_parallel: int = 16  # upper bound on tally subagents started at once
     # Cursor wants its own model ids (Settings → Models); a tier left as "inherit" runs on the chat's model
     cursor_models: dict[str, str] = Field(
         default_factory=lambda: {"haiku": "inherit", "sonnet": "inherit", "opus": "inherit"}
@@ -274,6 +254,7 @@ class FactoryConfig(_Model):
     setup: SetupConfig = Field(default_factory=SetupConfig)
     mcp_servers: dict[str, McpServer] = Field(default_factory=dict)
     secrets_file: str = DEFAULT_SECRETS_FILE
+    steps: dict[str, bool] = Field(default_factory=dict)  # e.g. {unit_tests: true}: the work step adds unit tests
 
     @field_validator("gates")
     @classmethod

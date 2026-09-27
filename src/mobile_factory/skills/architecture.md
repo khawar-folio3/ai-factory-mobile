@@ -12,3 +12,6 @@ Inputs: the spec output, and the team's existing apps (scout the sibling repos a
 - Keep the first version small enough for the first slice; note what later slices will add.
 
 A human approves the architecture before any code is written.
+
+- Shell: cap command output (`| tail -40`, `head`, `sed -n 'a,bp'`), quote globs, read files by line range
+  instead of whole files.

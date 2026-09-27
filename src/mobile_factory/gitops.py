@@ -76,12 +76,22 @@ class Git:
                 text += run(["git", "diff", "--no-index", "/dev/null", f], self.root).out
         return text
 
-    def numstat(self, since: str) -> int:
+    def untracked(self) -> list[str]:
+        return self("ls-files", "--others", "--exclude-standard").splitlines()
+
+    def numstat(self, since: str, files: list[str] | None = None) -> int:
+        """Lines added + removed since `since`, new untracked files included; `files` narrows it."""
+        paths = files if files is not None else self.changed_files(since)
+        new = set(self.untracked())
+        tracked = [f for f in paths if f not in new]
         total = 0
-        for line in self("diff", "--numstat", since, check=False).splitlines():
+        for line in (self("diff", "--numstat", since, "--", *tracked, check=False) if tracked else "").splitlines():
             a, d, *_ = line.split("\t")
             total += int(a) if a.isdigit() else 0
             total += int(d) if d.isdigit() else 0
+        for f in paths:
+            if f in new and (self.root / f).is_file():
+                total += sum(1 for _ in (self.root / f).open(errors="ignore"))
         return total
 
     def create_branch(self, name: str, base_ref: str) -> None:

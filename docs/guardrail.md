@@ -48,11 +48,12 @@ Refresh monthly with `--since <last harvest date>`; the skill merges evidence an
 
 | Outcome | Meaning | Effect |
 |---|---|---|
-| `applied` | code changed | checks + verify + commit (amend) re-run, then another review round |
-| `not applied` + reason | real issue, not safely fixable | blocker/major → run stops (`gate-needs-work`) |
-| `dismissed` + reason | detector false positive | blocker/major → the review gate goes to a human at any level |
+| `applied` | code changed | lint + unit tests once more (no install, no device), commit amended, on to the PR |
+| `not applied` + reason | real issue, not safely fixable | listed under "Open review notes" in the draft PR |
+| `dismissed` + reason | detector false positive | blocker/major → the PR gate goes to a human at any level |
 
-The last round must apply nothing (`limits.max_review_rounds`, default 2), so what the human sees is what was reviewed.
+One round (`limits.max_review_rounds`, default 1); a round counts only when it changed the diff. A failed re-check
+of the review's fixes is a PR note, not a loop back to fix.
 
 ## Using it without a run
 

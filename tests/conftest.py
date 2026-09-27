@@ -34,7 +34,6 @@ tracker:
   kind: file
 limits:
   max_fix_attempts: 2
-  max_review_rounds: 2
 """
 
 TICKET = """---
@@ -57,6 +56,8 @@ class FakePlatform(Platform):
         self.state = "activity  Main\nlabels    avatar-clipped\n"
         self.fail_checks = False
         self.check_calls = 0
+        self.last_hit: dict[str, str] = {}
+        self.flows: list[str] = []
 
     def doctor(self) -> list[Check]:
         return [Check("fake device", True)]
@@ -67,6 +68,9 @@ class FakePlatform(Platform):
     def build_install(self, log_dir: Path, launch: bool = True) -> CheckRun:
         return CheckRun(True, "installed")
 
+    def build_context(self) -> dict[str, str]:
+        return {"module": ":app:", "variant": "Debug", "unit_tests": ":app:testDebugUnitTest", "package": "com.x"}
+
     def modules_for(self, files: list[str]) -> list[str]:
         return sorted({f.split("/")[0] for f in files if f.split("/")[0] in ("app", "core")})
 
@@ -74,7 +78,7 @@ class FakePlatform(Platform):
         self.check_calls += 1
         return CheckRun(not self.fail_checks, "FAILED: :app:testDebugUnitTest" if self.fail_checks else "ok")
 
-    def screen_state(self) -> str:
+    def screen_state(self, png: Path | None = None) -> str:
         return self.state
 
     def screenshot(self, dest: Path) -> None:
@@ -92,11 +96,18 @@ class FakePlatform(Platform):
     def back(self) -> None:
         return None
 
+    def type_text(self, text: str) -> str:
+        return f"typed {text}"
+
+    def scroll(self, direction: str = "down") -> str:
+        return f"scrolled {direction}"
+
     def launch(self) -> str:
         return "launched"
 
     def run_flow(self, flow: Path, log_dir: Path) -> CheckRun:
-        return CheckRun(True, "ok")
+        self.flows.append(flow.read_text())
+        return CheckRun(True, "ok", None, [{"step": f"flow {flow.stem}", "ok": True, "duration_ms": 1200}])
 
 
 @pytest.fixture

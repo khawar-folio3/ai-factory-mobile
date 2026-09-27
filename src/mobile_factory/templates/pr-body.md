@@ -1,10 +1,10 @@
 {ticket_url}
 
-## Root cause
-{root_cause}
-
-## Fix
+## Change
 {changes}
+
+## Acceptance criteria
+{criteria}
 
 ## Tested
 {tested}

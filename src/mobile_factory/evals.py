@@ -31,7 +31,6 @@ class EvalScore(BaseModel):
     file_precision: float
     file_recall: float
     fix_attempts: int
-    review_rounds: int
     human_gates: int
     risk: int | None
     level: int
@@ -97,7 +96,6 @@ class Evals:
             file_precision=round(hit / len(ours), 2) if ours else 0.0,
             file_recall=round(hit / len(human), 2) if human else 0.0,
             fix_attempts=st.fix_attempts,
-            review_rounds=st.review_rounds,
             human_gates=sum(1 for g in st.gates.values() if g.decision in ("approved", "rejected")),
             risk=st.risk.score if st.risk else None,
             level=st.level,

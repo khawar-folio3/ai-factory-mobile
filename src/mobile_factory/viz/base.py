@@ -141,7 +141,7 @@ def event_sink(viz: Visualizer, root: Path) -> events.Sink:
         if kind:
             title = str(ev.get("title") or ev.get("node") or "")
             with contextlib.suppress(Exception):
-                short = label(str(ev.get("node") or title))  # node names are already short: triage, fix …
+                short = label(str(ev.get("node") or title))  # node names are already short: work, checks …
                 viz.send(root, f"run-{ev['run']}", kind, title=title, short=short, outcome=str(ev.get("outcome") or ""))
 
     return sink

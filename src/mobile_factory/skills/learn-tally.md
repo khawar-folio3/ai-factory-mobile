@@ -20,3 +20,6 @@ Write tool (never `cat >`/heredocs: headless runs refuse unlisted shell commands
 ]}
 ```
 One candidate per underlying preference in your chunk (not per comment). No names. No rule ids: the merge pass assigns them.
+
+- Shell: cap command output (`| tail -40`, `head`, `sed -n 'a,bp'`), quote globs, read files by line range
+  instead of whole files.

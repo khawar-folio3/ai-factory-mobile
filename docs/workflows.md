@@ -40,7 +40,8 @@ steps:
     gate: plan                      # a human approval point after it (plan, repro, diff, review, pr, report,
                                     #   tickets, architecture, or your own name); autonomy decides who approves
     model: opus                     # haiku | sonnet | opus | inherit (agents.models overrides)
-    scout: true                     # a Haiku scout gathers greps, history and CLI output first
+    scout: true                     # off by default: a Haiku scout gathers greps, history, CLI output first
+    optional: true                  # runs only when factory.yaml `steps: {<name>: true}` (or --tests for unit_tests)
     alongside: [locate, history]    # read-only helpers started in the same message
     parallel: [review-correctness]  # parts started together, then this step merges them
     retry_to: implement             # where to go when this step fails (default: the `change` step)
@@ -78,8 +79,31 @@ changes:
 | triage, reproduce, fix, verify | agent | the bug-fix steps |
 | plan, baseline, implement, accept | agent | acceptance criteria · screens before · the change · every criterion with evidence |
 | review | agent | guardrail findings |
+| detectors | auto | light review: deterministic detector findings, all go to the PR as review notes |
+| work | agent | light mode's one in-session step: `summary`, `acceptance_criteria` (met/blocked + evidence), `flow`, `notes` |
 | research | agent | question, answer, findings, options, recommendation |
 | split, spec, architecture, scaffold | agent | stories · app spec · stack decisions · project + first slice |
 | custom | agent | `summary`, `details`, `files`, `ok` — anything else; `ok: false` retries or stops |
 
-`factory schema <step>` prints the JSON an agent step must hand in.
+`factory next` shows an EXAMPLE of the JSON an agent step must hand in; an invalid `factory submit` lists its fields.
+
+## Light mode
+
+`mode: light` (the default in `factory.yaml`) runs Bug, Task, Story/Improvement (and a Sub-task of one) as the
+`light` workflow: preflight → intake → branch → work → checks → review (detectors) → commit → pr_preview (the only
+gate) → publish → handoff. The driving session does `work` itself: no subagents. `--tests` adds the unit-test
+guidance to `work`. `factory run <KEY> --team` or `mode: team` runs bugfix/task/feature instead.
+
+## Steering a run
+
+`factory run <KEY> --direction "…"` (or `--direction-file`, or the wizard's first question) stores the developer's
+direction in the run folder; `factory direct "…"` adds a timestamped entry mid-run. Every agent step gets it as a
+high-priority DIRECTION line and the plan must say how it follows it. It never overrides gates, forbidden paths or the
+no-secrets rule. Example:
+
+> Stage data returns the same type for all meeting spaces; mock the corrected types/v3 response with
+> `factory android mock` to rule out the backend.
+
+`factory android mock <path-regex> <file.json | jq filter>` serves overridden responses through a local mitmproxy
+(the device proxy is set with `adb reverse`; needs mitmproxy, its CA on the device and a debug build that trusts user
+CAs). `factory android mock --off` restores the device; hand-off turns it off too. No app code changes.

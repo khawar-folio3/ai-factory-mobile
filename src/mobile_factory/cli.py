@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from collections.abc import Callable, Iterator
 from importlib import resources
@@ -980,7 +981,7 @@ def _wizard(eng: Engine) -> None:
                 _agent_step(eng, agent)
             else:
                 eng.advance()
-        _show(eng)
+        _result(eng)
     except (KeyboardInterrupt, _Quit, typer.Abort):
         eng.save()
         typer.echo()
@@ -1024,7 +1025,7 @@ def _agent_step(eng: Engine, agent: str, tries: int = 2) -> None:
         cmd = _agent_cmd(agent, prompt, model, eng.lc.state_dir, tools=_STEP_TOOLS)
         log = eng.dir / "logs" / f"{node.name}-{attempt}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
-        code = _run_watched([cmd], eng.lc.root, [log], lambda: (f"{node.title} ({node.name})", 0, 0), timeout=3600)
+        code = _run_watched([cmd], eng.lc.root, [log], lambda: (node.title, 0, 0), timeout=3600)
         if not out.is_file():
             said = log.read_text(errors="ignore") if log.is_file() else ""
             if re.search(r"Failed to authenticate|not logged in|OAuth|Invalid API key|login", said, re.I):
@@ -1041,6 +1042,62 @@ def _agent_step(eng: Engine, agent: str, tries: int = 2) -> None:
             _say(f"  warning: {node.name} output rejected: {error.splitlines()[0][:150]}", hints=True)
     _say(f"  ✗ {node.title} did not complete after {tries} tries: {error.splitlines()[0][:150]}", hints=True)
     raise _Quit()
+
+
+_OUTCOMES = {
+    "draft-pr": "Draft PR opened",
+    "pr": "PR opened",
+    "report-posted": "Report posted to the ticket",
+    "tickets-created": "Stories created",
+    "needs-info": "Needs information before it can start",
+    "too-big": "Too big for one PR: split it first",
+    "ineligible": "Not a job for the factory",
+    "duplicate": "Duplicate",
+    "already-fixed": "Already fixed",
+    "rejected": "Stopped at a gate",
+    "verify-failed": "Could not get it to pass",
+    "preflight-failed": "Could not start",
+}
+
+
+def _wrap(text: str, indent: int = 4, lines: int = 8) -> list[str]:
+    width = max(50, min(shutil.get_terminal_size((100, 20)).columns, 110) - indent)
+    out = [ln for para in text.split("\n") for ln in (textwrap.wrap(para, width) or [""])]
+    return [" " * indent + ln for ln in out[:lines]] + ([" " * indent + "…"] if len(out) > lines else [])
+
+
+def _result(eng: Engine) -> None:
+    """How a finished run ended: a headline, the reason wrapped, questions or sub-tasks, and what to do next."""
+    st = eng.st
+    ok = st.status == "done"
+    head = _OUTCOMES.get(st.outcome, st.outcome.replace("-", " ").capitalize())
+    mark = typer.style("✓" if ok else "✗", fg="green" if ok else "red", bold=True)
+    typer.echo(f"  {mark} {typer.style(head, bold=True)}")
+    if st.pr_url:
+        typer.echo(f"    {st.pr_url}")
+    if st.stop_reason:
+        (eng.dir / "stop-reason.md").write_text(st.stop_reason + "\n")
+        typer.echo()
+        for ln in _wrap(st.stop_reason):
+            typer.echo(typer.style(ln, dim=True))
+    for name, title in (("questions.md", "Questions"), ("subtasks.md", "Proposed sub-tasks")):
+        f = eng.dir / name
+        if f.is_file():
+            typer.echo(f"\n  {typer.style(title, bold=True)}")
+            for item in [ln[2:] for ln in f.read_text().splitlines() if ln.startswith("- ")][:10]:
+                first, *rest = _wrap(item, indent=6, lines=3)
+                typer.echo("    · " + first.strip())
+                for ln in rest:
+                    typer.echo(ln)
+    typer.echo()
+    if not ok:
+        nxt = {
+            "needs-info": "answer the questions on the ticket, then: factory run " + st.ticket,
+            "too-big": "create the sub-tasks, then run each one",
+        }.get(st.outcome, "fix the cause, then: factory run " + st.ticket)
+        typer.echo(f"  {typer.style('▸ next', fg='cyan', bold=True)}  {nxt}")
+        typer.echo(typer.style(f"    full details: {_home(eng.dir)}", dim=True))
+    typer.echo()
 
 
 def _show(eng: Engine, brief: bool = False) -> None:
@@ -1068,9 +1125,7 @@ def _show(eng: Engine, brief: bool = False) -> None:
     if brief and not st.finished:  # inside the wizard: the step itself says what happens
         return
     if st.finished:
-        ok = st.status == "done"
-        mark = typer.style("✓" if ok else "✗", fg="green" if ok else "red", bold=True)
-        typer.echo(f"  {mark} {st.outcome}  {st.pr_url or st.stop_reason}")
+        _result(eng)
     elif st.status == "waiting_gate":
         gate = node.gate or ""
         first = eng.gate_summary(gate).splitlines()[0] if eng.gate_summary(gate) else ""

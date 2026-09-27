@@ -318,3 +318,65 @@ def test_workflow_can_be_forced(repo: Path, fake: FakePlatform) -> None:
     eng = Engine.start(load(repo), "APP-31", workflow_name="task")
     eng.advance()
     assert eng.st.pipeline == "task" and eng.st.node == "plan" and eng.st.workflow_source == "override"
+
+
+# ---------- your own workflows ----------
+
+
+def test_extends_with_changes_and_a_custom_step(repo: Path, fake: FakePlatform) -> None:
+    folder = workflow.folders(repo)[-1]
+    folder.mkdir(parents=True)
+    (folder / "hotfix.yaml").write_text(
+        "extends: bugfix\nmax_level: 1\nchanges:\n"
+        "  - add: {name: analytics, kind: agent, type: custom, skill: analytics-check, retry_to: fix,\n"
+        "          task: Check the screen_view events.}\n    after: fix\n"
+        "  - set: review\n    model: haiku\n"
+        "  - remove: pr_preview\n"
+    )
+    (folder / "analytics-check.md").write_text("# Analytics check\n")
+    wf = workflow.get("hotfix", repo)
+    names = wf.names
+    assert names.index("analytics") == names.index("fix") + 1 and "pr_preview" not in names
+    assert wf.step("review").model == "haiku" and wf.max_level == 1
+    assert wf.step("analytics").skill_file.endswith("analytics-check.md")
+    assert wf.artifact("change") == "fix"  # inherited
+
+    from mobile_factory.wizard import write_local
+
+    write_local(repo, {"tracker": {"pipelines": {"Bug": "hotfix"}}})
+    assert route(load(repo).cfg.tracker, "Story") == "feature"  # yours are merged onto the defaults
+    eng = Engine.start(load(repo), "APP-1")
+    assert eng.st.pipeline == "hotfix" and eng.st.ceiling == 1
+    eng.advance()
+    eng.submit("triage", {"verdict": "eligible", "reason": "clear", "summary": "Avatar clipped", "estimated_files": 1})
+    approve(eng, "repro") if eng.st.status == "waiting_gate" else None
+    fake.snapshot(eng.dir / "snapshots", "before", "profile")
+    if eng.st.node == "reproduce":
+        eng.submit("reproduce", {"reproduced": True, "confidence": 0.9, "steps": ["open"], "snapshots": ["profile"]})
+    if eng.st.status == "waiting_gate":
+        approve(eng, eng.node().gate or "")
+    (repo / "app/src/main/java/Profile.kt").write_text("class Profile {\n    val height = 64\n}\n")
+    eng.submit("fix", {"summary": "Wrap avatar height", "root_cause": "fixed height", "changes": "48 -> 64"})
+    if eng.st.status == "waiting_gate":
+        approve(eng, "diff")
+    assert eng.st.node == "analytics" and "analytics-check.md" in eng.instructions()
+    eng.submit("analytics", {"summary": "screen_view missing", "ok": False})
+    assert eng.st.node == "fix" and "screen_view missing" in eng.instructions()  # ok: false retried
+
+
+def test_validate_flags_unknown_types_and_missing_skills(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from typer.testing import CliRunner
+
+    from mobile_factory.cli import app
+
+    folder = workflow.folders(repo)[-1]
+    folder.mkdir(parents=True)
+    (folder / "odd.yaml").write_text(
+        "steps:\n  - {name: preflight}\n  - {name: dance, kind: agent, type: tango, task: Dance.}\n  - {name: handoff}\n"
+    )
+    monkeypatch.chdir(repo)
+    r = CliRunner().invoke(app, ["workflow", "validate"])
+    assert r.exit_code == 1 and "✗ odd" in r.output and "tango" in r.output and "✓ bugfix" in r.output
+    r = CliRunner().invoke(app, ["workflow", "new", "mine", "--from", "feature"])
+    assert r.exit_code == 0 and (folder / "mine.yaml").is_file()
+    assert workflow.get("mine", repo).names == workflow.get("feature").names  # the template only has comments

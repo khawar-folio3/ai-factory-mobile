@@ -138,6 +138,7 @@ EXAMPLES: dict[str, dict[str, object]] = {
         "decisions": [{"topic": "DI", "choice": "Hilt", "why": "team standard"}],
     },
     "scaffold": {"summary": "Create the visitor app with the check-in slice", "changes": "project + slice"},
+    "custom": {"summary": "Checked the analytics events", "files": ["context/analytics.md"], "ok": True},
 }
 
 
@@ -240,6 +241,15 @@ class ArchitectureOut(_Out):
     libraries: list[str] = Field(default_factory=list, description="name:version")
 
 
+class CustomOut(_Out):
+    """A custom agent step's output: what it did and where its results are."""
+
+    summary: str = Field(min_length=3)
+    details: str = ""
+    files: list[str] = Field(default_factory=list, description="files it wrote, e.g. in context/")
+    ok: bool = Field(True, description="false stops the run (or retries, when the step has retry_to)")
+
+
 MODELS: dict[str, type[_Out]] = {
     "triage": TriageOut,
     "reproduce": ReproOut,
@@ -255,4 +265,5 @@ MODELS: dict[str, type[_Out]] = {
     "spec": SpecOut,
     "architecture": ArchitectureOut,
     "scaffold": ImplementOut,
+    "custom": CustomOut,
 }

@@ -27,6 +27,7 @@ from .outputs import (
     MODELS,
     AcceptOut,
     BaselineOut,
+    CustomOut,
     FixOut,
     PlanOut,
     ReproOut,
@@ -91,7 +92,8 @@ class Engine:
         for other in store.all():
             if other.ticket == ticket and not other.finished:
                 raise FactoryError(f"{ticket} already has an open run {other.id}: `factory resume` or `factory abort`")
-        wf = workflow.get(workflow_name or _route_ticket(lc, ticket))
+        wf = workflow.get(workflow_name or _route_ticket(lc, ticket), lc.root)
+        check_workflow(wf)
         nodes = wf.steps
         st = RunState(
             id=new_run_id(ticket),
@@ -119,7 +121,7 @@ class Engine:
 
     @property
     def wf(self) -> workflow.Workflow:
-        return workflow.get(self.st.pipeline)
+        return workflow.get(self.st.pipeline, self.lc.root)
 
     @property
     def nodes(self) -> list[Node]:
@@ -328,7 +330,7 @@ class Engine:
             )
         if node.kind != "agent":
             return f"{head}\nrunner is at an automatic step; run `factory resume`."
-        skill = resources.files("mobile_factory.skills").joinpath(f"{node.skill}.md")
+        skill = node.skill_file or resources.files("mobile_factory.skills").joinpath(f"{node.skill}.md")
         lines = [
             head,
             f"TASK  {node.task}",
@@ -462,17 +464,17 @@ def _preflight(e: Engine) -> dict[str, Any]:
     return {"base": e.st.base, "base_sha": e.git("rev-parse", f"{e.cfg.vcs.remote}/{e.st.base}")}
 
 
-def route(tc: TrackerConfig, ticket_type: str, parent_type: str = "") -> str:
+def route(tc: TrackerConfig, ticket_type: str, parent_type: str = "", root: Path | None = None) -> str:
     """The workflow for a ticket type (tracker.pipelines); 'parent' means the parent's workflow (sub-tasks);
     file tickets without a type are bug fixes."""
     if not ticket_type:
         return "bugfix"
-    known = workflow.all_workflows()
+    known = workflow.all_workflows(root)
     pipe = tc.pipelines.get(ticket_type)
     if pipe == "parent":
         if not parent_type or tc.pipelines.get(parent_type, "parent") == "parent":
             raise Stop("ineligible", f"{ticket_type} has no parent with a workflow: run the parent, or map the type")
-        return route(tc, parent_type)
+        return route(tc, parent_type, root=root)
     if pipe:
         if pipe not in known:
             raise Stop("ineligible", f"{ticket_type} maps to workflow '{pipe}', which does not exist")
@@ -483,26 +485,31 @@ def route(tc: TrackerConfig, ticket_type: str, parent_type: str = "") -> str:
     )
 
 
-def detect_workflow(tc: TrackerConfig, t: tracker.Ticket) -> classify.Detection:
+def detect_workflow(tc: TrackerConfig, t: tracker.Ticket, root: Path | None = None) -> classify.Detection:
     """The Jira type's workflow unless the ticket's text clearly says otherwise (tracker.detect)."""
     try:
-        by_type = route(tc, t.type, t.parent_type) if t.type else ""
+        by_type = route(tc, t.type, t.parent_type, root) if t.type else ""
     except Stop:
         by_type = ""  # unmapped type: let the text decide
     if not tc.detect:
         if not by_type and t.type:
-            route(tc, t.type, t.parent_type)  # raises the clear "no workflow" reason
+            route(tc, t.type, t.parent_type, root)  # raises the clear "no workflow" reason
         return classify.Detection(by_type or "bugfix", "jira", "ticket type", {})
-    found = classify.detect(by_type, t.summary, t.description)
+    family = workflow.get(by_type, root).family if by_type else ""
+    found = classify.detect(family if by_type else "", t.summary, t.description)
+    if by_type and found.workflow == family:  # the text agrees with the type: keep the mapped (maybe custom) one
+        found.workflow = by_type
+    elif by_type and not family:  # a workflow of your own with no built-in family: the type decides
+        found = classify.Detection(by_type, "jira", "ticket type", found.scores)
     if t.type and not by_type and not any(found.scores.values()):
-        route(tc, t.type, t.parent_type)  # an unknown type and no signal in the text: stop with the clear reason
+        route(tc, t.type, t.parent_type, root)  # an unknown type and no signal in the text: stop with the reason
     return found
 
 
 def _route_ticket(lc: LoadedConfig, key: str) -> str:
     """Pick the workflow before the run starts, so its first steps are the right ones; intake re-checks it."""
     try:
-        return detect_workflow(lc.cfg.tracker, tracker.make(lc.cfg.tracker, lc.root).get(key)).workflow
+        return detect_workflow(lc.cfg.tracker, tracker.make(lc.cfg.tracker, lc.root).get(key), lc.root).workflow
     except (FactoryError, Stop):
         return "bugfix"  # intake reports the real problem
 
@@ -512,7 +519,7 @@ def _intake(e: Engine) -> dict[str, Any]:
     tc = e.cfg.tracker
     if tc.projects and t.key.split("-")[0] not in tc.projects:
         raise Stop("ineligible", f"{t.key} is outside tracker.projects {tc.projects}")
-    found = detect_workflow(tc, t)
+    found = detect_workflow(tc, t, e.lc.root)
     if e.st.workflow_source != "override" and found.workflow != e.st.pipeline:
         raise Stop("ineligible", f"{t.key} needs {found.workflow} ({found.reason}) but the run is {e.st.pipeline}")
     if e.st.workflow_source != "override":
@@ -887,6 +894,30 @@ def _post_architecture(e: Engine, o: Any) -> str | None:
     return None
 
 
+def _post_custom(e: Engine, o: Any) -> str | None:
+    c: CustomOut = o
+    if not c.ok:
+        if e.node().retry_to:
+            raise Retry(f"{e.st.node}: {c.summary} {c.details}".strip())
+        raise Stop("failed", f"{e.st.node}: {c.summary}")
+    return None
+
+
+def check_workflow(wf: workflow.Workflow) -> None:
+    """Every step's type must be one the engine knows: agent types have a schema and a check, auto types an action."""
+    bad = [
+        f"{s.name} ({s.kind} type {s.type})"
+        for s in wf.steps
+        if (s.kind == "agent" and (s.type not in POST or s.type not in MODELS))
+        or (s.kind == "auto" and s.type not in AUTO)
+    ]
+    if bad:
+        raise FactoryError(
+            f"workflow {wf.name} ({wf.source}): unknown step types: {', '.join(bad)}. Agent types: "
+            f"{', '.join(sorted(POST))}; auto types: {', '.join(sorted(AUTO))}"
+        )
+
+
 def _post_review(e: Engine, o: Any) -> str | None:
     r: ReviewOut = o
     detector = [rl.Finding.model_validate(f) for f in e.out("_review_ctx").get("detector", [])]
@@ -924,4 +955,5 @@ POST: dict[str, Callable[[Engine, Any], str | None]] = {
     "spec": _post_spec,
     "architecture": _post_architecture,
     "scaffold": _post_fix,
+    "custom": _post_custom,
 }

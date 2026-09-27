@@ -116,6 +116,20 @@ class LimitsConfig(_Model):
     rollback_on_fail: bool = True
 
 
+DEFAULT_PIPELINES = {  # ticket type -> workflow
+    "Bug": "bugfix",
+    "Task": "task",
+    "Sub-task": "parent",  # a sub-task runs its parent's workflow
+    "Subtask": "parent",
+    "Story": "feature",
+    "Improvement": "feature",
+    "New Feature": "feature",
+    "Spike": "spike",
+    "Epic": "epic",
+    "App": "new-app",
+}
+
+
 class TrackerConfig(_Model):
     kind: Literal["jira", "file"] = "file"
     provider: Literal["rest", "twg"] = "rest"
@@ -125,20 +139,15 @@ class TrackerConfig(_Model):
     projects: list[str] = Field(default_factory=list)
     allowed_types: list[str] = Field(default_factory=lambda: ["Bug", "Task"])  # legacy; routing uses `pipelines`
     detect: bool = True  # pick the workflow from the ticket's text when it clearly contradicts the Jira type
-    pipelines: dict[str, str] = Field(  # ticket type -> workflow; unmapped types stop with a clear reason
-        default_factory=lambda: {
-            "Bug": "bugfix",
-            "Task": "task",
-            "Sub-task": "parent",  # a sub-task runs its parent's workflow
-            "Subtask": "parent",
-            "Story": "feature",
-            "Improvement": "feature",
-            "New Feature": "feature",
-            "Spike": "spike",
-            "Epic": "epic",
-            "App": "new-app",
-        }
+    pipelines: dict[str, str] = Field(  # ticket type -> workflow; yours are merged onto these defaults
+        default_factory=lambda: dict(DEFAULT_PIPELINES)
     )
+
+    @field_validator("pipelines")
+    @classmethod
+    def _merge_pipelines(cls, v: dict[str, str]) -> dict[str, str]:
+        return {**DEFAULT_PIPELINES, **v}
+
     block_labels: list[str] = Field(default_factory=lambda: ["no-bot", "security", "needs-design"])
     transitions: dict[str, str] = Field(default_factory=dict)
 

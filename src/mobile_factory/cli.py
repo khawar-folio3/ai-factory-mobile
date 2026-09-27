@@ -29,7 +29,7 @@ from .guardrail import rules as rl
 from .init import init as do_init
 from .integrations import github
 from .outputs import MODELS
-from .pipeline import Engine
+from .pipeline import Engine, check_workflow
 from .platforms import make as make_platform
 from .platforms.base import snapshot_diff
 from .proc import has, which
@@ -49,6 +49,8 @@ eval_app = typer.Typer(no_args_is_help=True, help="Replay past fixed tickets to 
 app.add_typer(secrets_app, name="secrets")
 app.add_typer(android_app, name="android")
 app.add_typer(guard_app, name="guardrail")
+wf_app = typer.Typer(no_args_is_help=True, help="List, show, create and validate workflows (yours override built-ins).")
+app.add_typer(wf_app, name="workflow")
 viz_app = typer.Typer(
     no_args_is_help=True,
     help="Try the visualiser on its own, no factory run needed: status, start, stop, demo.",
@@ -1366,3 +1368,114 @@ def viz_demo(
         w.end("done")
     s.end("done")
     _say(f"  ok  demo finished ({1 + len(workers)} sessions)", hints=True)
+
+
+# ---------- workflows ----------
+
+NEW_WORKFLOW = """\
+# {name}: your workflow. Format: docs/workflows.md (or `factory workflow show {base}` for the steps you extend).
+description: {base} with my team's extra steps
+extends: {base}            # start from this workflow; `changes` edit it (or list every step under `steps:`)
+# max_level: 2             # autonomy cap for this kind of work
+# branch: fix/{{key}}-{{slug}}
+changes:
+  # Add your own agent step (type custom; its skill is {name}-check.md next to this file):
+  # - add: {{name: analytics, title: Analytics check, kind: agent, type: custom, skill: {name}-check,
+  #         task: "Check that every new screen logs its screen_view event."}}
+  #   after: {after}
+  # Change a step (gate, model, task, helpers...):
+  # - set: review
+  #   model: sonnet
+  # Remove a step:
+  # - remove: history
+"""
+
+
+def _wf_root() -> Path | None:
+    try:
+        return config.find_root()
+    except FactoryError:
+        return None
+
+
+@wf_app.command("list")
+def wf_list() -> None:
+    """Every workflow available here, where it comes from, and the ticket types routed to it."""
+    root = _wf_root()
+    routes: dict[str, list[str]] = {}
+    with contextlib.suppress(FactoryError):
+        for typ, wf_name in config.load(root).cfg.tracker.pipelines.items() if root else []:
+            routes.setdefault(wf_name, []).append(typ)
+    for name, wf in workflow.all_workflows(root).items():
+        src = "built-in" if wf.source == "built-in" else _home(Path(wf.source))
+        types = ", ".join(routes.get(name, [])) or "-"
+        _say(f"  · {name}  {len(wf.steps)} steps · types {types} · {src}", hints=True)
+
+
+@wf_app.command("show")
+def wf_show(name: str) -> None:
+    """The steps of a workflow: kind, type, gate, model and helpers."""
+    wf = workflow.get(name, _wf_root())
+    check_workflow(wf)
+    _say(f"== {wf.name}  ({wf.description})", hints=True)
+    for i, st in enumerate(wf.steps, 1):
+        extra = [
+            f"gate {st.gate}" if st.gate else "",
+            f"retry→{st.retry_to}" if st.retry_to else "",
+            "scout" if st.scout else "",
+            f"+{'/'.join(st.alongside)}" if st.alongside else "",
+            f"parallel {'/'.join(st.parallel)}" if st.parallel else "",
+        ]
+        kind = f"{st.kind}:{st.type}" if st.type != st.name else st.kind
+        _say(f"  {i:>2}. {st.name:<14} {kind:<16} {' · '.join(x for x in extra if x)}", hints=True)
+    _say(
+        f"  artifacts {wf.artifacts} · branch {wf.branch} · outcome {wf.outcome} · max level {wf.max_level}", hints=True
+    )
+
+
+@wf_app.command("new")
+def wf_new(
+    name: str,
+    base: str = typer.Option("bugfix", "--from", help="Workflow to extend."),
+    everywhere: bool = typer.Option(False, "--global", help="For every repo, not just this one."),
+) -> None:
+    """Create your own workflow that extends another; edit the file it prints, then `factory workflow validate`."""
+    root = _wf_root()
+    parent = workflow.get(base, root)
+    folder = workflow.folders(None if everywhere else root)[-1]
+    f = folder / f"{name}.yaml"
+    if f.exists():
+        raise FactoryError(f"{_home(f)} exists: edit it")
+    folder.mkdir(parents=True, exist_ok=True)
+    after = next((s.name for s in parent.steps if s.type in ("fix", "implement", "scaffold")), parent.steps[-2].name)
+    f.write_text(NEW_WORKFLOW.format(name=name, base=base, after=after))
+    _say(f"  ok  {_home(f)}", hints=True)
+    _say(f"  route tickets to it: tracker.pipelines  (e.g. Bug: {name})  in your local.yaml", hints=True)
+
+
+@wf_app.command("validate")
+def wf_validate(name: str = typer.Argument("", help="One workflow; default: all.")) -> None:
+    """Parse and check workflows: steps, types, retries, artifacts and skills."""
+    root = _wf_root()
+    wfs = workflow.all_workflows(root)
+    bad = False
+    for n, wf in wfs.items():
+        if name and n != name:
+            continue
+        try:
+            check_workflow(wf)
+            missing = [
+                st.skill
+                for st in wf.steps
+                if st.kind == "agent"
+                and not st.skill_file
+                and not resources.files("mobile_factory.skills").joinpath(f"{st.skill}.md").is_file()
+            ]
+            if missing:
+                raise FactoryError(f"no skill file for {', '.join(missing)} (put <skill>.md next to {wf.source})")
+            _say(f"  ok  {n}", hints=True)
+        except FactoryError as e:
+            bad = True
+            _say(f"  FAIL  {n}: {e}", hints=True)
+    if bad:
+        raise typer.Exit(1)

@@ -938,15 +938,57 @@ def run(
         raise FactoryError(f"unknown workflow {workflow_name}; known: {', '.join(workflow.all_workflows())}")
     eng = Engine.start(_lc(), ticket, ceiling=autonomy, base=base, workflow_name=workflow_name)
     eng.advance()
-    if eng.st.workflow_reason:
-        _say(f"  workflow: {eng.st.pipeline}  ({eng.st.workflow_reason})", hints=True)
-    _say(eng.instructions())
+    _show(eng)
+
+
+def _show(eng: Engine) -> None:
+    """A person at a terminal gets a short view; an agent (no TTY) gets the full brief for the current step."""
+    if not sys.stdout.isatty():
+        _say(eng.instructions())
+        return
+    st, node = eng.st, eng.node()
+    names = eng.nodes
+    i = next(k for k, n in enumerate(names) if n.name == st.node)
+    summary = eng.out("intake").get("summary", "")
+    typer.echo()
+    typer.echo(f"  {typer.style(st.ticket, bold=True)}  {typer.style(summary[:70], dim=True)}")
+    bar = "".join(
+        typer.style("━━", fg="green")
+        if k < i
+        else typer.style("━━", fg="cyan", bold=True)
+        if k == i
+        else typer.style("━━", dim=True)
+        for k in range(len(names))
+    )
+    typer.echo(f"  {bar}  {typer.style(f'{i + 1}/{len(names)}', dim=True)}")
+    typer.echo(f"  {typer.style(st.pipeline, fg='cyan')} workflow · {node.title}")
+    typer.echo()
+    if st.finished:
+        ok = st.status == "done"
+        mark = typer.style("✓" if ok else "✗", fg="green" if ok else "red", bold=True)
+        typer.echo(f"  {mark} {st.outcome}  {st.pr_url or st.stop_reason}")
+    elif st.status == "waiting_gate":
+        gate = node.gate or ""
+        first = eng.gate_summary(gate).splitlines()[0] if eng.gate_summary(gate) else ""
+        typer.echo(f"  {typer.style('◆ waiting for you', fg='yellow', bold=True)}  {first[:90]}")
+        typer.echo(
+            f"  {typer.style('review:', dim=True)} factory gate {gate}    "
+            f"{typer.style('then:', dim=True)} factory approve {gate}  |  factory reject {gate} --reason …"
+        )
+    elif node.kind == "agent":
+        typer.echo(f"  {typer.style('▸ next', fg='cyan', bold=True)}  your agent does “{node.title}”")
+        typer.echo(f"  {typer.style('in Claude Code:', dim=True)} continue {st.ticket} with the factory")
+    else:
+        typer.echo(f"  {typer.style('▸ next', fg='cyan', bold=True)}  factory resume")
+    if st.workflow_reason and st.workflow_source == "text":
+        typer.echo(f"  {typer.style('workflow chosen from the text: ' + st.workflow_reason, dim=True)}")
+    typer.echo()
 
 
 @app.command(name="next")
 def next_cmd(run: RunOpt = None) -> None:
     """Show what the agent must do now (or what the run waits on)."""
-    _say(_engine(run).instructions())
+    _show(_engine(run))
 
 
 @app.command()
@@ -954,7 +996,7 @@ def resume(run: RunOpt = None) -> None:
     """Continue automatic steps of a run (after a restart, a fixed environment or an approval)."""
     eng = _engine(run)
     eng.advance()
-    _say(eng.instructions())
+    _show(eng)
 
 
 @app.command()
@@ -963,7 +1005,7 @@ def submit(node: str, file: Path, run: RunOpt = None) -> None:
     data = json.loads(file.read_text())
     eng = _engine(run)
     eng.submit(node, data)
-    _say(eng.instructions())
+    _show(eng)
 
 
 @app.command()
@@ -1038,7 +1080,7 @@ def approve(gate_name: Annotated[str, typer.Argument(metavar="GATE")], run: RunO
     _say(eng.gate_summary(gate_name))
     typed = typer.prompt(f"\nType {rec.code} to approve gate '{gate_name}'")
     eng.decide(gate_name, True, by=getpass.getuser(), code=typed.strip())
-    _say(eng.instructions())
+    _show(eng)
 
 
 @app.command()
@@ -1051,7 +1093,7 @@ def reject(
     _human_only("rejecting a gate")
     eng = _engine(run)
     eng.decide(gate_name, False, by=getpass.getuser(), reason=reason)
-    _say(eng.instructions())
+    _show(eng)
 
 
 @app.command()

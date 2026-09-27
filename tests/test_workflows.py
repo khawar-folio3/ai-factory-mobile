@@ -372,3 +372,46 @@ def test_a_broken_workflow_stops_the_run_with_the_reason(repo: Path) -> None:
     )
     with pytest.raises(Exception, match="unknown step types: dance"):
         Engine.start(load(repo), "APP-1")
+
+
+def test_wizard_runs_agent_steps_asks_at_gates_pauses_and_picks_up(
+    repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json as js
+
+    import typer
+
+    from mobile_factory import cli
+
+    ticket(repo, "APP-40", "Story", "Taller avatar")
+    outputs = {"plan": PLAN}
+    calls: list[str] = []
+
+    def fake_agent(cmds: list[list[str]], cwd: Path, logs: list[Path], stage: object, **_: object) -> int:
+        prompt = cmds[0][2]
+        step = next((s for s in outputs if f"outputs/{s}.json" in prompt), None)
+        if step is None:
+            return 1  # an agent that wrote nothing
+        calls.append(step)
+        out = Path(prompt.split("write the output JSON to ")[1].split(" ")[0])
+        out.write_text(js.dumps(outputs[step]))
+        return 0
+
+    monkeypatch.setattr(cli, "_agent_cli", lambda lc: "claude")
+    monkeypatch.setattr(cli, "_run_watched", fake_agent)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_choose", lambda q, options, default: 2)  # "Pause here" at the plan gate
+    eng = Engine.start(load(repo, ceiling=0), "APP-40")
+    eng.advance()
+    with pytest.raises(typer.Exit):
+        cli._wizard(eng)
+    assert calls == ["plan"] and eng.st.status == "waiting_gate" and eng.node().gate == "plan"
+
+    again = Engine.load(load(repo), eng.st.id)  # later: `factory run APP-40` picks it up
+    monkeypatch.setattr(cli, "_choose", lambda q, options, default: 0)  # approve
+    outputs["baseline"] = {"snapshots": ["profile"]}
+    fake.snapshot(again.dir / "snapshots", "before", "profile")
+    with pytest.raises(typer.Exit):  # the next agent step has no scripted output: it stops, saved
+        cli._wizard(again)
+    assert again.st.gates["plan"].decision == "approved" and "baseline" in calls
+    assert Engine.load(load(repo), eng.st.id).st.node == "implement"  # progress was saved

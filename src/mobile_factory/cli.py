@@ -531,14 +531,24 @@ _DISTILL_TOOLS = (
 )
 
 
-def _agent_cmd(agent: str, prompt: str, model: str, state: Path, agents: Path | None = None) -> list[str]:
+# Tools a headless step may use: read and edit the repo, run the build and the device through the factory CLI.
+_STEP_TOOLS = (
+    "Read,Write,Edit,Grep,Glob,Agent,Task,Bash(factory:*),Bash(./gradlew:*),Bash(gradle:*),Bash(adb:*),Bash(git:*),"
+    "Bash(gh:*),Bash(twg:*),Bash(jq:*),Bash(sed:*),Bash(grep:*),Bash(rg:*),Bash(find:*),Bash(ls:*),Bash(cat:*),"
+    "Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(mkdir:*)"
+)
+
+
+def _agent_cmd(
+    agent: str, prompt: str, model: str, state: Path, *, agents: Path | None = None, tools: str = _DISTILL_TOOLS
+) -> list[str]:
     """One headless agent session; `agents` defines inline subagents it may start (Claude Code)."""
     pick = ["--model", model] if model and model != "inherit" else []
     if agent == "claude":
         extra = ["--agents", str(agents)] if agents else []
         return [
             "claude", "-p", prompt, "--permission-mode", "acceptEdits",
-            "--allowedTools", _DISTILL_TOOLS, "--add-dir", str(state), *extra, *pick,
+            "--allowedTools", tools, "--add-dir", str(state), *extra, *pick,
         ]  # fmt: skip
     return [agent, "-p", prompt, "--force", "--output-format", "text", *pick]
 
@@ -590,7 +600,7 @@ def _distill(lc: config.LoadedConfig, refresh: bool = False) -> bool:
         + "\n\n"
         + resources.files("mobile_factory.skills").joinpath("guardrail-learn.md").read_text()
     )
-    cmd = _agent_cmd(agent, prompt, lc.cfg.agents.model_for("guardrail-learn", target), lc.state_dir, agents)
+    cmd = _agent_cmd(agent, prompt, lc.cfg.agents.model_for("guardrail-learn", target), lc.state_dir, agents=agents)
     t0 = time.time()
 
     def written() -> bool:
@@ -936,12 +946,104 @@ def run(
     """Start a run for a ticket and advance to the first agent step or gate."""
     if workflow_name and workflow_name not in workflow.all_workflows():
         raise FactoryError(f"unknown workflow {workflow_name}; known: {', '.join(workflow.all_workflows())}")
-    eng = Engine.start(_lc(), ticket, ceiling=autonomy, base=base, workflow_name=workflow_name)
+    lc = _lc()
+    open_run = next((r for r in RunStore(lc.runs_dir).all() if r.ticket == ticket and not r.finished), None)
+    if open_run:
+        eng = Engine(lc, open_run)
+        if sys.stdout.isatty():
+            _say(f"  picking up {open_run.id} where it stopped", hints=True)
+    else:
+        eng = Engine.start(lc, ticket, ceiling=autonomy, base=base, workflow_name=workflow_name)
     eng.advance()
-    _show(eng)
+    if sys.stdout.isatty() and not os.environ.get("CI"):
+        _wizard(eng)
+    else:
+        _show(eng)
 
 
-def _show(eng: Engine) -> None:
+def _wizard(eng: Engine) -> None:
+    """Drive the run from the terminal: agent steps run headless, gates ask here, `q` or Ctrl+C stops. Every step is
+    saved, so `factory run <KEY>` again picks up where it stopped."""
+    agent = _agent_cli(eng.lc)
+    try:
+        while not eng.st.finished:
+            _show(eng, brief=True)
+            node = eng.node()
+            if eng.st.status == "waiting_gate":
+                _gate_here(eng, node.gate or "")
+            elif node.kind == "agent" and eng.st.status == "waiting_agent":
+                if not agent:
+                    _say(
+                        f"  warning: no {' or '.join(eng.cfg.agents.use)} CLI: run the step from your agent", hints=True
+                    )
+                    return
+                _agent_step(eng, agent)
+            else:
+                eng.advance()
+        _show(eng)
+    except (KeyboardInterrupt, _Quit, typer.Abort):
+        eng.save()
+        typer.echo()
+        _say(f"  ○ paused at {eng.node().title}. Pick up with: factory run {eng.st.ticket}", hints=True)
+        raise typer.Exit(0) from None
+
+
+def _gate_here(eng: Engine, gate: str) -> None:
+    rec = eng.st.gates[gate]
+    for line in eng.gate_summary(gate).splitlines()[:25]:
+        typer.echo(f"    {line}")
+    typer.echo()
+    pick = _choose(f"Gate '{gate}': what now?", ["Approve", "Reject (stops the run)", "Pause here"], 0)
+    if pick == 2:
+        raise _Quit()
+    if pick == 0:
+        eng.decide(gate, True, by=getpass.getuser(), code=rec.code)
+    else:
+        reason = _answer(typer.prompt(_q("Why?"), default="not right yet"))
+        eng.decide(gate, False, by=getpass.getuser(), reason=reason)
+
+
+def _agent_step(eng: Engine, agent: str, tries: int = 2) -> None:
+    """One agent step, headless: the agent writes the step's JSON to outputs/<step>.json; the wizard submits it."""
+    node = eng.node()
+    out = eng.dir / "outputs" / f"{node.name}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    error = ""
+    for attempt in range(1, tries + 1):
+        out.unlink(missing_ok=True)
+        brief = eng.instructions().replace(
+            f"SUBMIT write JSON then: factory submit {node.name} <file.json>",
+            f"SUBMIT write the output JSON to {out} (do NOT run factory submit; the runner submits it)",
+        )
+        prompt = (
+            f"You are running one step of a factory run in {eng.lc.root}. Read the SKILL file, do the step, then "
+            f"write the JSON output file and stop.\n\n{brief}"
+            + (f"\n\nYOUR LAST OUTPUT WAS REJECTED, fix it:\n{error}" if error else "")
+        )
+        model = eng.cfg.agents.model_for(node.name, "cursor" if agent != "claude" else "claude")
+        cmd = _agent_cmd(agent, prompt, model, eng.lc.state_dir, tools=_STEP_TOOLS)
+        log = eng.dir / "logs" / f"{node.name}-{attempt}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        code = _run_watched([cmd], eng.lc.root, [log], lambda: (f"{node.title} ({node.name})", 0, 0), timeout=3600)
+        if not out.is_file():
+            said = log.read_text(errors="ignore") if log.is_file() else ""
+            if re.search(r"Failed to authenticate|not logged in|OAuth|Invalid API key|login", said, re.I):
+                login = "claude auth login" if agent == "claude" else f"{agent} login"
+                _say(f"  ✗ {agent} is not logged in: run `{login}`, then `factory run {eng.st.ticket}`", hints=True)
+                raise _Quit()
+            error = f"no output file was written (exit {code}): {' '.join(said.split())[-300:] or 'see ' + str(log)}"
+            continue
+        try:
+            eng.submit(node.name, json.loads(out.read_text()))
+            return
+        except (FactoryError, ValueError) as e:
+            error = str(e)[:2000]
+            _say(f"  warning: {node.name} output rejected: {error.splitlines()[0][:150]}", hints=True)
+    _say(f"  ✗ {node.title} did not complete after {tries} tries: {error.splitlines()[0][:150]}", hints=True)
+    raise _Quit()
+
+
+def _show(eng: Engine, brief: bool = False) -> None:
     """A person at a terminal gets a short view; an agent (no TTY) gets the full brief for the current step."""
     if not sys.stdout.isatty():
         _say(eng.instructions())
@@ -963,6 +1065,8 @@ def _show(eng: Engine) -> None:
     typer.echo(f"  {bar}  {typer.style(f'{i + 1}/{len(names)}', dim=True)}")
     typer.echo(f"  {typer.style(st.pipeline, fg='cyan')} workflow · {node.title}")
     typer.echo()
+    if brief and not st.finished:  # inside the wizard: the step itself says what happens
+        return
     if st.finished:
         ok = st.status == "done"
         mark = typer.style("✓" if ok else "✗", fg="green" if ok else "red", bold=True)
@@ -996,7 +1100,10 @@ def resume(run: RunOpt = None) -> None:
     """Continue automatic steps of a run (after a restart, a fixed environment or an approval)."""
     eng = _engine(run)
     eng.advance()
-    _show(eng)
+    if sys.stdout.isatty() and not os.environ.get("CI"):
+        _wizard(eng)
+    else:
+        _show(eng)
 
 
 @app.command()

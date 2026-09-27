@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Take a mobile bug or small task from ticket to a verified draft PR through the Mobile Factory runner (`factory` CLI). Use when asked to fix a ticket, run the factory, continue a factory run, or report factory metrics.
+description: Take any Jira ticket through the Mobile Factory runner (`factory` CLI) - bugs and tasks to a verified draft PR, stories to a PR checked against acceptance criteria, spikes to a report, epics to stories, app ideas to a scaffold plus backlog. Use when asked to fix, build or run a ticket with the factory, continue a factory run, or report factory metrics.
 ---
 
 # Mobile Factory — driver
@@ -15,6 +15,13 @@ factory submit <node> <file.json>                      hand in a step's output
 factory schema <node>                                  JSON schema for a step
 factory status | risk | gate | metrics                 read-only views
 ```
+
+## Workflows
+
+The ticket's type picks the workflow (`tracker.pipelines`); the run shows it and `factory next` walks it:
+bugfix (Bug, Task) · feature (Story, Improvement) · spike (Spike: report, no code) · epic (Epic: stories) ·
+new-app (App: spec → architecture → first slice PR → backlog, a human at every gate).
+Every step's TASK, SKILL and output schema come from the run; never assume bug-fix steps.
 
 ## Loop
 

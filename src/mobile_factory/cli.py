@@ -16,7 +16,7 @@ from typing import Annotated, Any
 
 import typer
 
-from . import __version__, adapters, config, doctor, events, metrics, usage, viz
+from . import __version__, adapters, config, doctor, events, metrics, usage, viz, workflow
 from . import setup as machine
 from . import uninstall as remover
 from .config import VizConfig
@@ -961,9 +961,11 @@ def submit(node: str, file: Path, run: RunOpt = None) -> None:
 @app.command()
 def schema(node: str) -> None:
     """Print the JSON schema an agent step must submit."""
-    if node not in MODELS:
+    step = workflow.find_step(node)
+    kind = step.type if step else node
+    if kind not in MODELS:
         raise FactoryError(f"no schema for {node}; agent steps: {', '.join(MODELS)}")
-    _say(json.dumps(MODELS[node].model_json_schema(), indent=2))
+    _say(json.dumps(MODELS[kind].model_json_schema(), indent=2))
 
 
 @app.command()

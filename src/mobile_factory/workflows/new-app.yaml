@@ -1,0 +1,54 @@
+description: A new app from scratch - spec, architecture, a scaffold with the first slice as a PR, the rest as stories.
+branch: feature/{key}-{slug}
+pr_template: pr-body-feature.md
+max_level: 0  # greenfield: a human at every gate
+artifacts: {plan: spec, change: scaffold, after: accept}
+steps:
+  - {name: preflight}
+  - {name: intake, title: Read ticket}
+  - name: spec
+    title: Product spec
+    kind: agent
+    gate: plan
+    scout: true
+    task: >-
+      Turn the ticket into a product spec: users, screens, the first thin vertical slice with acceptance criteria,
+      the remaining slices (each a future story), and non-functional needs (offline, auth, analytics, a11y).
+  - name: architecture
+    kind: agent
+    gate: architecture
+    task: >-
+      Decide the stack and structure for the spec: modules, layers and patterns, navigation, DI, networking,
+      persistence, testing, CI, and the libraries with their versions. Prefer what the team already uses. One line of
+      reasoning per decision.
+  - {name: branch, title: Branch & checkpoint}
+  - name: scaffold
+    kind: agent
+    gate: diff
+    skill: scaffold
+    task: >-
+      Create the project per the architecture and build the first slice so its acceptance criteria hold, with tests
+      and a CI config. Do not commit.
+  - {name: checks, title: "Lint, tests, build", retry_to: scaffold}
+  - name: accept
+    title: Acceptance on device
+    kind: agent
+    retry_to: scaffold
+    alongside: [review-correctness, review-taste, review-detectors]
+    task: >-
+      Install the build, capture `factory snap after <label>` for each screen of the first slice, then check EVERY
+      acceptance criterion with evidence (snapshot label, test or observation).
+  - {name: commit}
+  - name: review
+    title: Guardrail review
+    kind: agent
+    gate: review
+    parallel: [review-correctness, review-taste, review-detectors]
+    task: >-
+      Review the diff in context/diff.patch against context/rules.md. Address every detector finding in
+      context/detector.json. Apply blocker/major fixes; mark each finding applied / not applied / dismissed (reason
+      required). Every finding cites a rule id or 'GENERAL'.
+  - {name: pr_preview, title: PR preview, gate: pr}
+  - {name: publish, title: "Push & draft PR"}
+  - {name: create_tickets, title: Backlog stories, source: spec}
+  - {name: handoff, title: Hand-off}

@@ -92,7 +92,153 @@ EXAMPLES: dict[str, dict[str, object]] = {
             }
         ]
     },
+    "plan": {
+        "verdict": "eligible",
+        "reason": "one screen, existing API, fits one PR",
+        "summary": "Show a Favourites filter on the Spaces list",
+        "acceptance_criteria": ["A Favourites chip appears above the list", "Tapping it shows only favourited spaces"],
+        "plan": ["add chip to SpacesFilterBar", "filter in SpacesViewModel", "unit test the filter"],
+        "areas": ["feature/spaces"],
+        "screens": ["spaces_list"],
+        "estimated_files": 3,
+    },
+    "baseline": {"snapshots": ["spaces_list"], "steps": ["open Spaces tab"]},
+    "implement": {
+        "summary": "Add a Favourites filter to the Spaces list",
+        "changes": "chip + VM filter",
+        "tests_added": True,
+    },
+    "accept": {
+        "criteria": [
+            {"criterion": "A Favourites chip appears above the list", "met": True, "evidence": "snap spaces_list"},
+            {"criterion": "Tapping it shows only favourited spaces", "met": True, "evidence": "SpacesViewModelTest"},
+        ],
+        "snapshots": ["spaces_list"],
+    },
+    "research": {
+        "question": "Can we drop the legacy map SDK?",
+        "answer": "Yes after OMX moves to MapUIKit; two screens still use it.",
+        "findings": ["library/.../LegacyMapFragment.kt:40 is the last user", "PR #1812 migrated floors"],
+        "recommendation": "Migrate the two screens, then remove the dependency",
+    },
+    "split": {
+        "summary": "Room booking v2",
+        "stories": [{"summary": "Show room capacity on the room card", "acceptance_criteria": ["Capacity shows"]}],
+    },
+    "spec": {
+        "summary": "Visitor check-in app for front desks",
+        "screens": ["home", "check_in"],
+        "acceptance_criteria": ["Home lists today's visitors", "Tapping a visitor checks them in"],
+        "stories": [{"summary": "Print a visitor badge", "acceptance_criteria": ["A badge prints on check-in"]}],
+    },
+    "architecture": {
+        "summary": "Single-activity Compose app",
+        "platform": "android-kotlin-compose",
+        "modules": ["app", "core:data", "feature:checkin"],
+        "decisions": [{"topic": "DI", "choice": "Hilt", "why": "team standard"}],
+    },
+    "scaffold": {"summary": "Create the visitor app with the check-in slice", "changes": "project + slice"},
 }
+
+
+class PlanOut(_Out):
+    verdict: Literal["eligible", "needs-info", "ineligible", "too-big", "duplicate"]
+    reason: str = Field(min_length=3)
+    summary: str = Field(min_length=3, description="one line: what the user gets")
+    acceptance_criteria: list[str] = Field(
+        default_factory=list, description="each one observable on the device or in a test; from the ticket or drafted"
+    )
+    plan: list[str] = Field(default_factory=list)
+    areas: list[str] = Field(default_factory=list, description="files/packages expected to change")
+    screens: list[str] = Field(default_factory=list, description="labels of the screens to baseline and check")
+    designs: list[str] = Field(default_factory=list, description="Figma links or frame names the change follows")
+    estimated_files: int = Field(0, ge=0)
+    public_api_change: bool = False
+    risk_classes: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list, description="for needs-info: what the reporter must answer")
+    subtasks: list[str] = Field(default_factory=list, description="for too-big: one line per proposed sub-task")
+
+
+class BaselineOut(_Out):
+    snapshots: list[str] = Field(min_length=1, description="labels captured with `factory snap before <label>`")
+    steps: list[str] = Field(default_factory=list, description="how to reach each screen")
+    notes: str = ""
+
+
+class ImplementOut(_Out):
+    summary: str = Field(min_length=5, max_length=72, description="imperative commit subject, without the ticket key")
+    changes: str = Field(min_length=5, description="what changed and why, briefly")
+    tests_added: bool = False
+    notes: str = ""
+
+
+class Criterion(BaseModel):
+    criterion: str
+    met: bool
+    evidence: str = Field(min_length=3, description="snapshot label, test name or what was observed")
+
+
+class AcceptOut(_Out):
+    criteria: list[Criterion] = Field(min_length=1)
+    snapshots: list[str] = Field(default_factory=list, description="labels captured with `factory snap after <label>`")
+    notes: str = ""
+
+
+class Option(BaseModel):
+    name: str
+    pros: list[str] = Field(default_factory=list)
+    cons: list[str] = Field(default_factory=list)
+
+
+class ResearchOut(_Out):
+    question: str = Field(min_length=5)
+    answer: str = Field(min_length=10, description="the short answer, first")
+    findings: list[str] = Field(min_length=1, description="facts with evidence: path:line, commit, PR, doc link")
+    options: list[Option] = Field(default_factory=list)
+    recommendation: str = ""
+    open_questions: list[str] = Field(default_factory=list)
+
+
+class Story(BaseModel):
+    summary: str = Field(min_length=5, max_length=120)
+    description: str = ""
+    acceptance_criteria: list[str] = Field(min_length=1)
+    type: str = "Story"
+
+
+class SplitOut(_Out):
+    summary: str = Field(min_length=3, description="one line: what the epic delivers")
+    stories: list[Story] = Field(min_length=1)
+    rationale: str = ""
+
+
+class SpecOut(_Out):
+    verdict: Literal["eligible", "needs-info"] = "eligible"
+    summary: str = Field(min_length=3, description="one line: the app and who it is for")
+    users: list[str] = Field(default_factory=list)
+    screens: list[str] = Field(default_factory=list, description="labels of the first slice's screens")
+    acceptance_criteria: list[str] = Field(
+        default_factory=list, description="for the FIRST slice only: observable on the device or in a test"
+    )
+    stories: list[Story] = Field(default_factory=list, description="the remaining slices, each a future story")
+    non_functional: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class Decision(BaseModel):
+    topic: str
+    choice: str
+    why: str = ""
+
+
+class ArchitectureOut(_Out):
+    summary: str = Field(min_length=3)
+    platform: str = Field(min_length=2, description="e.g. android-kotlin-compose")
+    modules: list[str] = Field(min_length=1)
+    decisions: list[Decision] = Field(min_length=1)
+    libraries: list[str] = Field(default_factory=list, description="name:version")
+
 
 MODELS: dict[str, type[_Out]] = {
     "triage": TriageOut,
@@ -100,4 +246,13 @@ MODELS: dict[str, type[_Out]] = {
     "fix": FixOut,
     "verify": VerifyOut,
     "review": ReviewOut,
+    "plan": PlanOut,
+    "baseline": BaselineOut,
+    "implement": ImplementOut,
+    "accept": AcceptOut,
+    "research": ResearchOut,
+    "split": SplitOut,
+    "spec": SpecOut,
+    "architecture": ArchitectureOut,
+    "scaffold": ImplementOut,
 }

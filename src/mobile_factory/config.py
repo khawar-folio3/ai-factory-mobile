@@ -48,7 +48,9 @@ class ProjectConfig(_Model):
     platform: Literal["android"] = "android"
     base_branch: str = "ask"
     branch_pattern: str = "bugfix/{key}-{slug}"
-    branch_pattern_by_type: dict[str, str] = Field(default_factory=lambda: {"Task": "feature/{key}-{slug}"})
+    branch_pattern_by_type: dict[str, str] = Field(
+        default_factory=lambda: {t: "feature/{key}-{slug}" for t in ("Task", "Story", "Improvement", "New Feature")}
+    )
     forbidden_paths: list[str] = Field(
         default_factory=lambda: [
             "**/build.gradle*",
@@ -101,6 +103,9 @@ def _default_gates() -> dict[str, GateConfig]:
         "diff": GateConfig(auto_at=3),
         "review": GateConfig(auto_at=3),
         "pr": GateConfig(auto_at=4),
+        "report": GateConfig(auto_at=5),  # posting to a ticket: always a human
+        "tickets": GateConfig(auto_at=5),  # creating tickets: always a human
+        "architecture": GateConfig(auto_at=5),  # a new app's stack: always a human
     }
 
 
@@ -118,7 +123,20 @@ class TrackerConfig(_Model):
     email: str = ""
     token: str = ""
     projects: list[str] = Field(default_factory=list)
-    allowed_types: list[str] = Field(default_factory=lambda: ["Bug", "Task"])
+    allowed_types: list[str] = Field(default_factory=lambda: ["Bug", "Task"])  # legacy; routing uses `pipelines`
+    pipelines: dict[str, str] = Field(  # ticket type -> workflow; unmapped types stop with a clear reason
+        default_factory=lambda: {
+            "Bug": "bugfix",
+            "Task": "bugfix",
+            "Sub-task": "bugfix",
+            "Story": "feature",
+            "Improvement": "feature",
+            "New Feature": "feature",
+            "Spike": "spike",
+            "Epic": "epic",
+            "App": "new-app",
+        }
+    )
     block_labels: list[str] = Field(default_factory=lambda: ["no-bot", "security", "needs-design"])
     transitions: dict[str, str] = Field(default_factory=dict)
 
@@ -153,6 +171,15 @@ DEFAULT_MODELS = {
     "guardrail-learn": "sonnet",
     "learn-tally": "sonnet",
     "locate": "sonnet",
+    "plan": "opus",
+    "baseline": "sonnet",
+    "implement": "opus",
+    "accept": "sonnet",
+    "research": "opus",
+    "split": "opus",
+    "spec": "opus",
+    "architecture": "opus",
+    "scaffold": "opus",
     "history": "haiku",  # git log/blame and past PRs: facts, no judgement
     "scout": "haiku",  # greps, git history, CLI output: mechanical work stays on the cheapest tier
 }

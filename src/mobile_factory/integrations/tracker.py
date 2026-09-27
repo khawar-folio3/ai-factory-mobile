@@ -133,6 +133,23 @@ class Tracker:
     def transition(self, key: str, to_status: str) -> str:
         raise NotImplementedError
 
+    def comment(self, key: str, markdown: str) -> str:
+        raise NotImplementedError
+
+    def create(self, project: str, type_: str, summary: str, description: str, parent: str = "") -> str:
+        """Create a work item; returns its key."""
+        raise NotImplementedError
+
+
+def adf(markdown: str) -> dict[str, Any]:
+    """Plain Atlassian document: one paragraph per block of text (formatting stays as typed)."""
+    blocks = [b.strip() for b in markdown.split("\n\n") if b.strip()]
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [{"type": "paragraph", "content": [{"type": "text", "text": b}]} for b in blocks],
+    }
+
 
 class FileTracker(Tracker):
     """Tickets as YAML/Markdown files in the factory home: `tickets/<KEY>.yaml` or `<KEY>.md` (front matter optional)."""
@@ -157,6 +174,22 @@ class FileTracker(Tracker):
 
     def transition(self, key: str, to_status: str) -> str:
         return f"file tracker: {key} not moved (no status)"
+
+    def comment(self, key: str, markdown: str) -> str:
+        f = self.dir / f"{key}.comments.md"
+        with f.open("a") as fh:
+            fh.write(markdown.rstrip() + "\n\n---\n\n")
+        return f"comment added to {f.name}"
+
+    def create(self, project: str, type_: str, summary: str, description: str, parent: str = "") -> str:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        used = [
+            int(m.group(1)) for p in self.dir.glob(f"{project}-*.*") if (m := re.match(rf"{project}-(\d+)\.", p.name))
+        ]
+        key = f"{project}-{max(used, default=0) + 1}"
+        meta = {"type": type_, **({"parent": parent} if parent else {})}
+        (self.dir / f"{key}.md").write_text(f"---\n{yaml.safe_dump(meta)}---\n# {summary}\n\n{description}\n")
+        return key
 
 
 class JiraRest(Tracker):
@@ -198,6 +231,21 @@ class JiraRest(Tracker):
             return f"no transition to {to_status} on {key}; move it by hand"
         self._call("POST", f"/rest/api/3/issue/{key}/transitions", {"transition": {"id": match["id"]}})
         return f"{key} -> {to_status}"
+
+    def comment(self, key: str, markdown: str) -> str:
+        self._call("POST", f"/rest/api/3/issue/{urllib.parse.quote(key)}/comment", {"body": adf(markdown)})
+        return f"comment added to {key}"
+
+    def create(self, project: str, type_: str, summary: str, description: str, parent: str = "") -> str:
+        fields: dict[str, Any] = {
+            "project": {"key": project},
+            "issuetype": {"name": type_},
+            "summary": summary,
+            "description": adf(description),
+        }
+        if parent:
+            fields["parent"] = {"key": parent}
+        return str(self._call("POST", "/rest/api/3/issue", {"fields": fields})["key"])
 
 
 def site_prefix(site: str) -> str:
@@ -244,6 +292,19 @@ class JiraTwg(Tracker):
             return f"no transition to {to_status} on {key}; move it by hand"
         self._json("jira", "workitem", "transition", "--id", key, "--transition-id", str(match["id"]))
         return f"{key} -> {to_status}"
+
+    def comment(self, key: str, markdown: str) -> str:
+        self._json(
+            "jira", "workitem", "comment", "create", "--issue-id", key, "--body", markdown, "--body-format", "markdown"
+        )
+        return f"comment added to {key}"
+
+    def create(self, project: str, type_: str, summary: str, description: str, parent: str = "") -> str:
+        args = ["jira", "workitem", "create", "--space", project, "--type", type_, "--summary", summary]
+        args += ["--description", description, "--description-format", "markdown", "--yes"]
+        d = self._json(*args, *(["--parent", parent] if parent else []))
+        d = d.get("data", d)
+        return str(d.get("key") or d.get("issueKey") or d.get("id", "?"))
 
 
 def make(cfg: TrackerConfig, root: Path) -> Tracker:

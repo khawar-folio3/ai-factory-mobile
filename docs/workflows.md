@@ -13,12 +13,8 @@ ticket types itself.
 
 Later sources win by name, so `bugfix.yaml` in your folder replaces the built-in one. Nothing goes into the repo.
 
-```bash
-factory workflow list                         # what exists here, from where, which ticket types route to it
-factory workflow show feature                 # its steps
-factory workflow new hotfix --from bugfix     # your own, extending a built-in (add --global for every repo)
-factory workflow validate                     # check them all
-```
+Copy a built-in or write your own; a broken workflow stops `factory run` with the reason.
+
 
 Route ticket types to workflows in your `local.yaml`: `tracker: {pipelines: {Bug: hotfix}}`. A value of `parent`
 means "the parent's workflow" (sub-tasks). The ticket's text can also override its type (`tracker.detect`).

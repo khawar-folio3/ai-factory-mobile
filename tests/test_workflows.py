@@ -364,19 +364,11 @@ def test_extends_with_changes_and_a_custom_step(repo: Path, fake: FakePlatform) 
     assert eng.st.node == "fix" and "screen_view missing" in eng.instructions()  # ok: false retried
 
 
-def test_validate_flags_unknown_types_and_missing_skills(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from typer.testing import CliRunner
-
-    from mobile_factory.cli import app
-
+def test_a_broken_workflow_stops_the_run_with_the_reason(repo: Path) -> None:
     folder = workflow.folders(repo)[-1]
     folder.mkdir(parents=True)
-    (folder / "odd.yaml").write_text(
+    (folder / "bugfix.yaml").write_text(
         "steps:\n  - {name: preflight}\n  - {name: dance, kind: agent, type: tango, task: Dance.}\n  - {name: handoff}\n"
     )
-    monkeypatch.chdir(repo)
-    r = CliRunner().invoke(app, ["workflow", "validate"])
-    assert r.exit_code == 1 and "✗ odd" in r.output and "tango" in r.output and "✓ bugfix" in r.output
-    r = CliRunner().invoke(app, ["workflow", "new", "mine", "--from", "feature"])
-    assert r.exit_code == 0 and (folder / "mine.yaml").is_file()
-    assert workflow.get("mine", repo).names == workflow.get("feature").names  # the template only has comments
+    with pytest.raises(Exception, match="unknown step types: dance"):
+        Engine.start(load(repo), "APP-1")

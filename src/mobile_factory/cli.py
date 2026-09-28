@@ -42,7 +42,10 @@ from .state import RunState, RunStore
 from .wizard import Wizard, store_secret, write_local
 
 app = typer.Typer(
-    no_args_is_help=True, add_completion=False, help="Mobile Factory: ticket -> verified draft PR, with gates."
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+    help="Mobile Factory: ticket -> verified draft PR, with gates.",
 )
 secrets_app = typer.Typer(no_args_is_help=True, help="Per-machine secrets file (one place for every token).")
 android_app = typer.Typer(no_args_is_help=True, help="Drive the Android app on the attached device/emulator.")

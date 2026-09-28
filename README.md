@@ -54,6 +54,8 @@ factory install --target all          # skills + MCP config for Claude Code (.cl
 A repo set up once by the lead needs only `factory setup` and `factory doctor` on each new machine: see
 [docs/onboarding.md](docs/onboarding.md).
 
+Full walkthrough: [docs/usage.md](docs/usage.md). Every command takes `-h` / `--help`.
+
 Then ask the agent: *"fix APP-123 with the factory"*. The agent loops `factory next` → does the step → `factory submit`.
 When a gate needs you, it stops and tells you to run, in your own terminal:
 
@@ -134,7 +136,7 @@ as a character: steps are tools it works on, gates are permission prompts it wai
 
 ## Documentation
 
-[Onboarding](docs/onboarding.md) · [Architecture](docs/architecture.md) · [Autonomy](docs/autonomy.md) · [Configuration](docs/configuration.md) ·
+[Usage guide](docs/usage.md) · [Onboarding](docs/onboarding.md) · [Architecture](docs/architecture.md) · [Autonomy](docs/autonomy.md) · [Configuration](docs/configuration.md) ·
 [Guardrail](docs/guardrail.md) · [Events & visualisation](docs/events.md) · [Evals](docs/evals.md) ·
 [Adding a platform](docs/platforms.md) · [Roadmap](docs/roadmap.md)
 

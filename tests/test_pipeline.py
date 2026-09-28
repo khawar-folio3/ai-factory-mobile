@@ -342,3 +342,41 @@ def test_direction_reaches_the_work_step(repo: Path, fake: FakePlatform) -> None
     eng.direct("Only the Project Room type is wrong.")
     assert eng.direction() == "Only the Project Room type is wrong."
     assert eng.direction_file.read_text().count("## ") == 2  # timestamped entries, appended
+
+
+def open_pr_branch(repo: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    git(repo, "switch", "-q", "-c", "feature/APP-1-earlier")
+    edit(repo)
+    git(repo, "commit", "-qam", "APP-1: Make the profile avatar 64dp")
+    git(repo, "push", "-q", "origin", "feature/APP-1-earlier")
+    git(repo, "switch", "-q", "main")
+    git(repo, "branch", "-q", "-D", "feature/APP-1-earlier")
+    pr = {"url": "https://github.com/acme/demo/pull/3", "headRefName": "feature/APP-1-earlier", "baseRefName": "main"}
+    monkeypatch.setattr("mobile_factory.pipeline.github.open_pr", lambda root, key: pr)
+    return git(repo, "rev-parse", "origin/feature/APP-1-earlier")
+
+
+def test_an_open_pr_is_adopted_and_verified_without_a_new_pr(
+    repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tip = open_pr_branch(repo, monkeypatch)
+    eng = Engine.start(load(repo), "APP-1")
+    to_work(eng)
+    assert eng.st.adopted and eng.st.branch == "feature/APP-1-earlier" and eng.st.checkpoint == tip
+    assert "ADOPTED https://github.com/acme/demo/pull/3" in eng.instructions()
+    eng.submit("work", work(eng))
+    assert eng.st.status == "done" and eng.st.pr_url.endswith("/pull/3"), eng.instructions()
+    assert git(repo, "rev-parse", "HEAD") == tip and "title" not in fake.published and "branch" not in fake.published
+
+
+def test_a_fix_on_an_adopted_pr_is_pushed_to_it(
+    repo: Path, fake: FakePlatform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    open_pr_branch(repo, monkeypatch)
+    eng = Engine.start(load(repo), "APP-1")
+    to_work(eng)
+    edit(repo, "class Profile {\n    val height = 72\n}\n")
+    eng.submit("work", work(eng))
+    assert eng.st.status == "done", eng.instructions()
+    assert fake.published == {"branch": "feature/APP-1-earlier"}
+    assert git(repo, "rev-list", "--count", f"{eng.st.checkpoint}..HEAD") == "1"

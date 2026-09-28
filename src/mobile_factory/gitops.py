@@ -94,6 +94,15 @@ class Git:
                 total += sum(1 for _ in (self.root / f).open(errors="ignore"))
         return total
 
+    def switch_remote(self, name: str, remote: str) -> None:
+        """Check out an existing remote branch at its remote tip (an adopted PR)."""
+        self.fetch(remote, name)
+        if self("branch", "--list", name):
+            self("switch", name)
+            self("merge", "--ff-only", f"{remote}/{name}")
+        else:
+            self("switch", "-c", name, "--track", f"{remote}/{name}")
+
     def create_branch(self, name: str, base_ref: str) -> None:
         if self("branch", "--list", name):
             raise FactoryError(f"branch {name} already exists: delete it or resume the run that created it")

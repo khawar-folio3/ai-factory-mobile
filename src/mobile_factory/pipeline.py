@@ -529,6 +529,11 @@ class Engine:
                 f"KIND  {self.st.kind}"
                 + (": the flow shows the defect before the fix" if self.st.kind == "bugfix" else "")
             )
+        if self.st.adopted and node.name == self.wf.artifact("change"):
+            lines.append(
+                f"ADOPTED {self.st.pr_url}: the change is already on this branch. Verify it against the criteria;"
+                " change code only where a criterion fails. `summary` = what this run verified or fixed"
+            )
         if (unit := node.params.get("with_tests")) and (self.cfg.steps.get(TESTS) or TESTS in self.st.enabled):
             lines.append(f"UNIT  {' '.join(unit.split())}")
         if (tests := self.out("_tests")).get("ok"):
@@ -706,6 +711,13 @@ def _intake(e: Engine) -> dict[str, Any]:
 
 
 def _branch(e: Engine) -> dict[str, Any]:
+    if pr := github.open_pr(e.lc.root, e.st.ticket):
+        e.git.switch_remote(pr["headRefName"], e.cfg.vcs.remote)
+        e.git.fetch(e.cfg.vcs.remote, pr["baseRefName"])
+        e.st.branch, e.st.base, e.st.pr_url, e.st.adopted = pr["headRefName"], pr["baseRefName"], pr["url"], True
+        e.st.checkpoint = e.git.head()
+        e.notify(f"adopted {pr['url']}: verifying it on {pr['headRefName']}, no new branch or PR")
+        return {"branch": e.st.branch, "checkpoint": e.st.checkpoint, "adopted": pr["url"]}
     p = e.cfg.project
     pattern = p.branch_pattern_by_type.get(e.out("intake").get("type", ""), e.wf.branch)
     title = e.art("plan").get("summary") or e.out("intake").get("summary", "")  # light: no plan yet, the ticket title
@@ -731,8 +743,12 @@ def _tested(e: Engine, ver: dict[str, Any], snaps: str) -> str:
 
 
 def _changed(e: Engine) -> tuple[list[str], list[difflib.FileDiff]]:
-    files = e.git.changed_files(e.st.checkpoint)
-    return files, difflib.parse(e.git.diff(e.st.checkpoint, files))
+    """The run's change; an adopted PR with nothing new is checked as the whole PR against its base."""
+    since = e.st.checkpoint
+    if e.st.adopted and not e.git.changed_files(since):
+        since = e.git.merge_base(f"{e.cfg.vcs.remote}/{e.st.base}")
+    files = e.git.changed_files(since)
+    return files, difflib.parse(e.git.diff(since, files))
 
 
 def _lint_tests(e: Engine) -> tuple[str, str]:
@@ -785,6 +801,9 @@ def _size(e: Engine, files: list[str]) -> None:
 
 def _commit(e: Engine) -> dict[str, Any]:
     changed = e.git.changed_files(e.st.checkpoint)
+    if e.st.adopted and not changed:
+        e.notify(f"nothing to commit: {e.st.pr_url} already meets the criteria")
+        return {"sha": e.git.head(), "subject": "", "amended": False, "files": [], "left_out": []}
     reviewed = set(e.out("_review_ctx").get("files", changed))
     untracked = set(e.git.untracked())
     files = [f for f in changed if not matches(f, NEVER_STAGE) and (f not in untracked or f in reviewed)]
@@ -808,6 +827,8 @@ def _commit(e: Engine) -> dict[str, Any]:
 
 
 def _pr_preview(e: Engine) -> dict[str, Any]:
+    if e.st.adopted:
+        return _adopted_preview(e)
     ticket_url = e.out("intake").get("url", "")
     fix, ver = e.art("change"), e.art("after")
     snaps = "\n".join(
@@ -838,6 +859,21 @@ def _pr_preview(e: Engine) -> dict[str, Any]:
     return {"title": title, "file": str(f), "sha": preview_sha(title, body)}
 
 
+def _adopted_preview(e: Engine) -> dict[str, Any]:
+    """An adopted PR keeps its title and body: the gate approves only what gets pushed to it."""
+    sha = e.out("commit").get("sha", "")
+    push = e.out("commit").get("subject") or "nothing (no code change)"
+    crit = "\n".join(
+        f"- [{'x' if c.get('met') else ' '}] {c.get('criterion', '')}: {c.get('evidence') or c.get('reason', '')}"
+        for c in _criteria(e.art("after"))
+    )
+    body = f"Existing PR {e.st.pr_url} ({e.st.branch} -> {e.st.base})\nPush: {push}\n\nVerified:\n{crit}\n"
+    title = f"{e.st.ticket}: update {e.st.pr_url}"
+    f = e.dir / "pr-body.md"
+    f.write_text(body + _notes(e))
+    return {"title": title, "file": str(f), "sha": preview_sha(title, f.read_text()), "head": sha}
+
+
 def _notes(e: Engine) -> str:
     """What the draft PR must say out loud: blocked criteria and the detector findings."""
     blocked = [c for c in _criteria(e.art("after")) if c.get("blocked")]
@@ -862,7 +898,7 @@ def _guard_publish(e: Engine, title: str, body: str) -> None:
     if not title.startswith(f"{e.st.ticket}: "):
         refuse(f"title must start with '{e.st.ticket}: '")
     url = e.out("intake").get("url", "")
-    if url and not body.lstrip().startswith(url):
+    if url and not e.st.adopted and not body.lstrip().startswith(url):
         refuse("body must open with the ticket link")
     if e.cfg.vcs.forbid_attribution and ATTRIBUTION.search(body):
         refuse("body carries tool attribution")
@@ -870,7 +906,7 @@ def _guard_publish(e: Engine, title: str, body: str) -> None:
         refuse(f"on {e.git.branch()}, not the ticket branch")
     if e.git.dirty():
         refuse("uncommitted changes")
-    if e.git.commits_since(e.st.checkpoint) != 1:
+    if e.git.commits_since(e.st.checkpoint) != (0 if e.st.adopted and not e.out("commit").get("files") else 1):
         refuse("expected exactly one commit on top of the checkpoint")
     if e.out("commit").get("sha") != e.git.head():
         refuse("HEAD moved after the commit step")
@@ -883,6 +919,10 @@ def _publish(e: Engine) -> dict[str, Any]:
     approved = e.st.gates.get("pr")
     if preview_sha(p["title"], body) != p["sha"] or not approved or approved.sha != p["sha"]:
         raise Stop("refused", "REFUSED: PR title/body differ from the approved preview. Nothing pushed.")
+    if e.st.adopted:
+        if e.out("commit").get("files"):
+            github.push(e.lc.root, e.cfg.vcs.remote, e.st.branch)
+        return {"pr_url": e.st.pr_url, "pushed": bool(e.out("commit").get("files")), "tracker": ""}
     github.push(e.lc.root, e.cfg.vcs.remote, e.st.branch)
     url = github.create_pr(
         e.lc.root, e.st.base, e.st.branch, p["title"], Path(p["file"]), draft=e.cfg.vcs.draft, label=e.cfg.vcs.pr_label

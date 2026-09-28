@@ -49,6 +49,7 @@ class RunState(BaseModel):
     outcome: str = ""
     stop_reason: str = ""
     pr_url: str = ""
+    adopted: bool = False  # the ticket already had an open PR: the run verifies and pushes to it
     history: list[str] = Field(default_factory=list)
     enabled: list[str] = Field(default_factory=list)  # optional steps turned on for this run (`factory run --tests`)
     started: dict[str, float] = Field(default_factory=dict)  # step -> epoch its current attempt began

@@ -21,6 +21,17 @@ def gh_json(root: Path, *args: str) -> Any:
     return json.loads(text) if text else None
 
 
+def open_pr(root: Path, key: str) -> dict[str, str] | None:
+    """The open PR already carrying this ticket (its key in the title or head branch); None when gh can't tell."""
+    fields = "url,title,headRefName,baseRefName"
+    out = gh(root, "pr", "list", "--state", "open", "--search", f"{key} in:title", "--json", fields, check=False)
+    try:
+        prs = json.loads(out) if out.startswith("[") else []
+    except json.JSONDecodeError:
+        prs = []
+    return next((p for p in prs if p["title"].startswith(key) or key in p["headRefName"]), None)
+
+
 def accounts() -> list[str]:
     r = run(["gh", "auth", "status", "--json", "hosts"])
     if not r.ok and not r.out:

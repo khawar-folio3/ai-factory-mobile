@@ -27,10 +27,13 @@ class FactoryMocks:
             if "file" in rule:
                 body = Path(rule["file"]).read_text()
             else:
-                real = flow.response.get_text() or "null"
-                body = subprocess.run(
-                    ["jq", "-c", rule["jq"]], input=real, capture_output=True, text=True, check=False
-                ).stdout
+                real = flow.response.get_text()
+                if flow.response.status_code != 200 or not real:
+                    return  # 304s and empty bodies pass through: a jq over nothing would serve "null"
+                jq = subprocess.run(["jq", "-c", rule["jq"]], input=real, capture_output=True, text=True, check=False)
+                if jq.returncode or not jq.stdout.strip():
+                    return
+                body = jq.stdout
             flow.response.status_code = int(rule.get("status", 200))
             flow.response.headers["content-type"] = "application/json"
             flow.response.set_text(body)

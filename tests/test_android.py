@@ -199,3 +199,4 @@ def test_mock_rules_are_run_scoped(droid: StubAndroid, tmp_path: Path, monkeypat
         droid.mock_on(tmp_path)
     assert droid.mock_off(tmp_path).startswith("mocks off")
     assert ("shell", "settings", "put", "global", "http_proxy", ":0") in droid.calls
+    assert not (tmp_path / android.MOCKS).exists()

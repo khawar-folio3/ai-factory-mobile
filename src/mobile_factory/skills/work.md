@@ -14,7 +14,7 @@ Do it yourself: no subagents, scouts or parallel helpers. Output: the task's EXA
 5. Flow (the FLOW line, pattern `<factory home>/flows/maestro/omx_meeting_space_types.yaml`; START from saved flows
    in `<factory home>/flows/maestro/`, ROUTES grep): `appId`, `---`, one `# criterion N: <text>` section per
    criterion: reach the state, `assertVisible` / `assertNotVisible`; `takeScreenshot` only for a visual criterion.
-6. `factory android install`, then the RUN line: `maestro --device <serial> test <flow> 2>&1 | tail -40`.
+6. `factory android install`, then the RUN line as printed (full maestro path, subshell cd), piped to `| tail -40`.
    Failing → fix the code (or a wrong selector) and rerun; at most 3 fix rounds.
 7. A state the backend won't give: `factory android mock <path-regex> <file.json|jq>`, then `--off`;
    unavailable → that criterion is `blocked` with `reason`.

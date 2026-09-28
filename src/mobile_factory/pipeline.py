@@ -570,7 +570,7 @@ class Engine:
             f"FLOW     write {flow}: one `# criterion N: <text>` section per criterion, assertVisible/assertNotVisible",
             *(f"START    from {f}" for f in maestro.matching(self.library(), self.art("plan").get("screens", []))),
             f"ROUTES   grep {self.library().parent / ROUTES}",
-            f"RUN      cd {shots} && maestro --device <serial> test {flow}   (fix the flow and rerun, at most 3 rounds)",
+            f"RUN      (cd {shots} && {maestro.binary() or 'maestro'} --device <serial> test {flow})   (fix the flow and rerun, at most 3 rounds)",
         ]
 
     def progress(self) -> str:

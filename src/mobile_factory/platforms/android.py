@@ -493,6 +493,7 @@ class Android(Platform):
         if pid := _alive(run_dir / "mock.pid"):
             os.kill(pid, signal.SIGTERM)
         (run_dir / "mock.pid").unlink(missing_ok=True)
+        (run_dir / MOCKS).unlink(missing_ok=True)
         return "mocks off: device proxy cleared, real responses again"
 
     def run_flow(self, flow: Path, log_dir: Path) -> CheckRun:
